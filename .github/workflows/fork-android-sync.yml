@@ -11,7 +11,6 @@ on:
     branches: [dev]
     paths:
       - "android/**"
-      - ".github/workflows/fork-android-sync.yml"
   workflow_dispatch:
     inputs:
       force_release:
@@ -37,7 +36,7 @@ jobs:
       EXPECTED_CERT_SHA256: "6e15649bef53454faaa68698cfee795eee2cc10030ca9b8676125b3b321034be"
     steps:
       - name: Checkout fork dev branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: dev
           fetch-depth: 0
@@ -112,7 +111,7 @@ jobs:
 
       - name: Set up JDK 21
         if: steps.sync.outputs.need_build == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
