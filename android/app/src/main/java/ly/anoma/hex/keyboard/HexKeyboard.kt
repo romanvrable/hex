@@ -17,6 +17,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import ly.anoma.hex.MainActivity
 import ly.anoma.hex.R
+import ly.anoma.hex.bubble.DictationHistory
 import ly.anoma.hex.speech.LocalSpeech
 import ly.anoma.hex.speech.MicCapture
 import ly.anoma.hex.speech.Signature
@@ -38,6 +39,7 @@ import ly.anoma.hex.updates.Updates
 internal fun Context.speechNote(note: String?) = when (note) {
     "Allow the microphone in Hex" -> getString(R.string.keyboard_hint_microphone)
     "Microphone unavailable. Try again." -> getString(R.string.keyboard_note_microphone)
+    "Microphone blocked in background" -> getString(R.string.bubble_note_rearmed)
     "Couldn’t transcribe. Try again." -> getString(R.string.keyboard_note_transcribe)
     "No speech heard" -> getString(R.string.keyboard_note_no_speech)
     "Speech model unavailable" -> getString(R.string.keyboard_note_model)
@@ -95,7 +97,7 @@ class HexKeyboard : InputMethodService() {
         contentResolver.registerContentObserver(UserDictionary.Words.CONTENT_URI, true, dictionaryChanged)
         capture = MicCapture(LocalSpeech(applicationContext),
             update = { phase, note -> view?.status(phase, speechNote(note) ?: idleHint(), note != null) },
-            meter = { view?.setLevel(it) }, insert = ::commitSpeech)
+            meter = { view?.setLevel(it) }, insert = ::commitSpeech, appContext = applicationContext)
     }
     override fun onEvaluateFullscreenMode() = false
     override fun onCreateInputView(): View = KeyboardView(this, this).also {
@@ -174,6 +176,7 @@ class HexKeyboard : InputMethodService() {
     internal fun cancelSpeech() = capture.cancelLatest()
     private fun commitSpeech(text: String, options: SpeechOptions) {
         if (currentInputConnection == null || engine.secure || !isInputViewShown) return
+        DictationHistory.record(this, text)
         // Read now, so a toggle or text changed while it transcribed applies to this dictation. Hex's own
         // fields, such as Settings' practice box, never get the signature.
         val own = currentInputEditorInfo?.packageName == packageName

@@ -1,7 +1,11 @@
 package ly.anoma.hex.speech
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
@@ -66,6 +70,7 @@ internal class MicCapture(
     private val update: (SpeechPhase, String?) -> Unit,
     private val meter: (Float) -> Unit,
     private val insert: (String, SpeechOptions) -> Unit,
+    private val appContext: Context? = null,
 ) {
     private class Ticket(val options: SpeechOptions) {
         val job = jobs.incrementAndGet()
@@ -213,11 +218,26 @@ internal class MicCapture(
             .setBufferSizeInBytes(maxOf(minBuffer, rate * 2 * 2)).build()
         var count = 0
         var voiced = 0
+        var silenced = false
+        var blocks = 0
         val edges = SpeechEdges(rate)
         var lastUpdate = 0L
+        val audioManager = if (ticket.options.duckAudio) appContext?.getSystemService(AudioManager::class.java) else null
+        var focusRequest: AudioFocusRequest? = null
         try {
             check(record.state == AudioRecord.STATE_INITIALIZED)
             if (!ticket.cancelled && !ticket.finish) {
+                if (audioManager != null) {
+                    val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .build()
+                    if (audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) focusRequest = req
+                }
                 record.startRecording()
                 check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING)
                 main.post { if (active === ticket && !ticket.finish) publish(SpeechPhase.Listening) }
@@ -231,6 +251,9 @@ internal class MicCapture(
                 if (rms > .004) voiced += n
                 edges.block(count, n, rms > .004)
                 count += n
+                if (blocks++ % 25 == 0) {
+                    silenced = silenced || record.activeRecordingConfiguration?.isClientSilenced == true
+                }
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastUpdate >= 75) {
                     lastUpdate = now
@@ -240,12 +263,19 @@ internal class MicCapture(
         } finally {
             try {
                 if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
-            } finally { record.release() }
+            } finally {
+                record.release()
+                focusRequest?.let { req -> runCatching { audioManager?.abandonAudioFocusRequest(req) } }
+            }
         }
         val span = speechSpan(edges.first, edges.last, count, rate)
         // Only with "setprop log.tag.HexSpeech DEBUG": how much audio arrived, never the audio or its words.
         if (Log.isLoggable(LOG_TAG, Log.DEBUG)) Log.d(LOG_TAG, "captured $count samples, $voiced voiced, kept ${span.first}..${span.last + 1}")
         if (ticket.cancelled) return
+        if (voiced == 0 && silenced && count >= rate / 4) {
+            complete(ticket, "Microphone blocked in background")
+            return
+        }
         if (voiced < rate / 10 || count < rate / 4) {
             complete(ticket, "No speech heard")
             return

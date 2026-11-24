@@ -1,5 +1,24 @@
 # Hex for Android
 
+Dictate into any app on Android using **100% on-device speech-to-text** — either through a **floating bubble** that stays on top of your existing keyboard (such as **Microsoft SwiftKey** or Gboard) without ever switching input methods, or through Hex’s optional full keyboard.
+
+## Floating bubble (keep your own keyboard)
+
+By default, Setup configures **Floating bubble** mode so your current keyboard stays active at all times:
+
+- **Appear while typing (or always):** [HexAccessibilityService](app/src/main/java/ly/anoma/hex/bubble/HexAccessibilityService.kt) draws a non-focusable `TYPE_ACCESSIBILITY_OVERLAY` [DotScopeBubbleView](app/src/main/java/ly/anoma/hex/bubble/DotScopeBubbleView.kt) whenever a soft keyboard opens (or continuously when **Show bubble › Always** is chosen), needing no separate “draw over apps” permission and never closing your keyboard.
+- **Gestures:**
+  - **Tap:** starts hands-free dictation (warm pearl braided trace + breathing coral rim); tap again to finish and insert.
+  - **Hold (≥350 ms):** push-to-talk — the bubble enlarges and lifts above your thumb while you speak, then transcribes and inserts on release.
+  - **Double-tap:** opens the non-focus-stealing **Quick menu** right beside the bubble to **Undo dictation** (12 s window), **Paste last**, switch **Language** or **Style**, choose **Next dictation** (*Paste in English* vs *Paste as spoken*), or toggle **Clean up** / **Translate** while your keyboard stays open.
+  - **Long-press (≥550 ms):** cancels an active recording or aborts an in-flight Whisper decode immediately.
+  - **Drag:** moves the bubble anywhere and snaps to the nearer screen edge, preserving its screen fraction across rotations and foldable screens.
+- **Direct text insertion without touching the clipboard:** on Android 13+ (API 33+), [BubbleInserter](app/src/main/java/ly/anoma/hex/bubble/BubbleInserter.kt) commits text through `AccessibilityService.InputMethod` (`AccessibilityInputConnection`), applying Hex’s mid-sentence capitalization rules, smart spacing, and optional **Labs › Signature** line; older editors fall back to `ACTION_SET_TEXT` splicing at the caret or `ACTION_PASTE`. Password and PIN fields never accept dictation.
+- **Customisable appearance & audio cues:** choose **Circle**, **Pill** (desktop Hex’s expanding HUD), **Hexagon**, or **Square** in **Small / Medium / Large**, preview the animation live in **Settings › Floating bubble**, optionally enable desktop Hex’s seven feedback sound sets (*Hex signature, Classic, Click, Soft tone, Wood, Warm synth, Thock*) or **Lower other audio** while speaking.
+- **Restricted settings helper (sideloaded APKs on Android 13+):** if Android greys out the Accessibility switch for an APK installed outside a store, Setup surfaces a one-tap **App info** shortcut for *⋮ › Allow restricted settings*.
+
+## Optional Hex keyboard
+
 Hold the Hex key, speak and release to insert text in the current app. A tap starts hands-free dictation; ✓ finishes and ✕ discards. The Hex key sits at the strip’s trailing end, where Gboard has its mic; while dictating it becomes ✓ and the live dot waveform grows out of it, above the keys. While Hex transcribes, a spinner takes the checkmark’s place and ✕ still cancels, which also stops the transcription itself. A recording stops at 1 minute and says so (“Stopped at 1 minute”); its text is still inserted. Dictation’s notes show in the strip even while Hex Preview’s update line is waiting, which returns afterwards. The keys are Gboard’s size and place on a Pixel (measured on an emulator), with ?123, comma, space, period and enter in the bottom row; the system’s own switcher in the navigation bar, or Hex menu › Next keyboard, changes keyboards.
 
 ## Speech model and privacy
@@ -19,7 +38,9 @@ Welcome explains that the internet is used only to fetch the 190 MB speech model
 
 **Clean up what I say** is off by default. The [deterministic rules](app/src/main/java/ly/anoma/hex/speech/SpokenCleanup.kt) remove hesitations and resolve explicit self-corrections against nearby words of the same kind. Spanish, German and Norwegian use the iOS word lists and pause boundaries; English uses explicit markers, not iOS’s learned tagger or an LLM. Ambiguous repairs stay as spoken. Ordinary negation and language-specific words such as German “eh” and Norwegian “er” stay intact.
 
-**Translate what I say** is also off by default. With Español and translation enabled, **Next dictation** offers **Paste in English** or **Paste as spoken**. The choice is captured when recording begins; after a one-off spoken-language insertion, the next dictation returns to English. Translation is multilingual Whisper’s native speech-to-English task, not a second text model or online SDK. The tested Spanish WAV inserted both “El café todavía está caliente.” and “The coffee is still hot.” offline.
+**Translate what I say** is also off by default. With any non-English dictation language (such as Deutsch, Español or Français) and translation enabled, **Next dictation** offers **Paste in English** or **Paste as spoken** in both the Bubble quick menu and the Hex keyboard menu. The choice is captured when recording begins; after a one-off spoken-language insertion, the next dictation returns to English. Translation is multilingual Whisper’s native speech-to-English task, not a second text model or online SDK.
+
+**Word replacements** (`spoken phrase => replacement`, off by default in **Dictation**) rewrite whole phrases longest-match-first while protecting custom vocabulary terms and cleaning up spacing and sentence capitalization when a replacement deletes a filler phrase.
 
 ## Typing assistance
 

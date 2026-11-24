@@ -10,8 +10,9 @@ internal object SpokenText {
     fun format(raw: String, options: SpeechOptions): String {
         val language = if (options.translate) "en" else options.spoken.code
         val spelled = VocabularySpelling.apply(options.vocabulary, raw)
-        if (options.style == Style.Verbatim || raw.isBlank()) return finished(style(spelled, options.style, language), options)
-        val spoken = SpokenCleanup.counts(SpokenCleanup.symbols(spelled.trim(), language), language)
+        val replaced = TextReplacements.apply(options.replacements, spelled, options.vocabulary)
+        if (options.style == Style.Verbatim || replaced.isBlank()) return finished(style(replaced, options.style, language), options)
+        val spoken = SpokenCleanup.counts(SpokenCleanup.symbols(replaced.trim(), language), language)
         val cleaned = if (options.clean) SpokenCleanup.clean(spoken, language) else spoken
         val styled = style(cleaned, options.style, language, options.endWithPeriod, options.formatLists, options.spokenPunctuation)
         // French spacing goes last, since every style takes the spaces before marks out; Verbatim keeps the model's.
@@ -19,7 +20,8 @@ internal object SpokenText {
     }
 
     private fun finished(styled: String, options: SpeechOptions): String {
-        val text = VocabularySpelling.apply(options.vocabulary, styled)
+        val spelled = VocabularySpelling.apply(options.vocabulary, styled)
+        val text = TextReplacements.apply(options.replacements, spelled, options.vocabulary)
         return if (options.lowercase) text.lowercase(Locale.ROOT) else text
     }
 
@@ -45,7 +47,7 @@ internal object SpokenText {
         return when (style) {
             Style.Polished -> polish(cleaned, english)
             Style.Casual -> casual(cleaned, english)
-            else -> notes(cleaned, english)
+            else -> notes(cleaned, code(language))
         }
     }
 
@@ -268,11 +270,20 @@ internal object SpokenText {
 
     // Notes
 
-    private fun notes(text: String, english: Boolean): String {
+    private fun notes(text: String, lang: String): String {
         if (text.isEmpty()) return ""
-        val working = text.replace(Regex("(?i)\\bnew paragraph\\b[,.]?\\s*"), "\n\n")
-            .replace(Regex("(?i)\\bnew line\\b[,.]?\\s*"), "\n")
-            .replace(Regex("(?i)(?:^|\\s+)(?:bullet point|next bullet|bullet)\\b[:,-]?\\s*"), "\n- ")
+        val english = lang == "en"
+        val working = when (lang) {
+            "de" -> text.replace(Regex("(?iu)\\bneuer absatz\\b[,.]?\\s*"), "\n\n")
+                .replace(Regex("(?iu)\\bneue zeile\\b[,.]?\\s*"), "\n")
+                .replace(Regex("(?iu)(?:^|\\s+)(?:stichpunkt|aufzählungspunkt|nächster punkt)\\b[:,-]?\\s*"), "\n- ")
+            "es" -> text.replace(Regex("(?iu)\\bnuevo párrafo\\b[,.]?\\s*"), "\n\n")
+                .replace(Regex("(?iu)\\b(?:nueva línea|salto de línea)\\b[,.]?\\s*"), "\n")
+                .replace(Regex("(?iu)(?:^|\\s+)(?:viñeta|siguiente punto)\\b[:,-]?\\s*"), "\n- ")
+            else -> text.replace(Regex("(?i)\\bnew paragraph\\b[,.]?\\s*"), "\n\n")
+                .replace(Regex("(?i)\\bnew line\\b[,.]?\\s*"), "\n")
+                .replace(Regex("(?i)(?:^|\\s+)(?:bullet point|next bullet|bullet)\\b[:,-]?\\s*"), "\n- ")
+        }
         var lines = working.split('\n')
         if (lines.size == 1) {
             val line = fixSpacing(collapse(lines[0]))

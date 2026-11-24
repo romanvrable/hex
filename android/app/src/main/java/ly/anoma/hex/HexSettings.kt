@@ -40,6 +40,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import ly.anoma.hex.bubble.BubbleDictationService
+import ly.anoma.hex.bubble.BubblePreferences
+import ly.anoma.hex.bubble.DictationHistory
+import ly.anoma.hex.bubble.HexAccessibilityService
 import ly.anoma.hex.feedback.Feedback
 import ly.anoma.hex.feedback.FeedbackForm
 import ly.anoma.hex.speech.*
@@ -47,12 +51,14 @@ import ly.anoma.hex.typing.TypingPreferences
 import ly.anoma.hex.updates.Updates
 
 private enum class Page(val title: Int) {
-    Home(R.string.app_name), Dictation(R.string.settings_dictation), Keyboard(R.string.settings_keyboard), Privacy(R.string.settings_privacy),
-    Labs(R.string.settings_labs),
+    Home(R.string.app_name), Bubble(R.string.settings_bubble), Dictation(R.string.settings_dictation),
+    Keyboard(R.string.settings_keyboard), Privacy(R.string.settings_privacy), Labs(R.string.settings_labs),
+    SoundSets(R.string.bubble_sound_set), History(R.string.labs_recent_dictations),
     Language(R.string.settings_dictation_language), Layout(R.string.settings_keyboard_layout), Styles(R.string.settings_style),
     Policy(R.string.settings_privacy_policy), Licences(R.string.settings_licences), Licence(R.string.settings_licences),
     Feedback(R.string.feedback_send_feedback);
     val parent get() = when (this) {
+        SoundSets -> Bubble
         Language, Styles -> Dictation
         Layout -> Keyboard
         Policy, Licences -> Privacy
@@ -74,21 +80,26 @@ private fun licenceFiles(context: Context) =
     context.assets.list("licenses").orEmpty().filter { it != "credits.txt" }.sorted()
 
 @Composable
-internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: TypingPreferences,
+internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: TypingPreferences, bubble: BubblePreferences,
                          model: ModelStore.State, download: () -> Unit, phase: SpeechPhase, transcript: String,
                          notice: String?, dictate: () -> Unit, cancel: () -> Unit, clear: () -> Unit, setupPage: (Int) -> Unit,
                          systemSettings: () -> Unit, startPage: String? = null) {
     var page by rememberSaveable {
-        mutableStateOf(if (startPage == MainActivity.PAGE_KEYBOARD) Page.Keyboard else Page.Home)
+        mutableStateOf(
+            when (startPage) {
+                MainActivity.PAGE_KEYBOARD -> Page.Keyboard
+                MainActivity.PAGE_BUBBLE -> Page.Bubble
+                else -> Page.Home
+            }
+        )
     }
     var licence by rememberSaveable { mutableStateOf("") }
     var practice by remember { mutableStateOf("") }
     val context = LocalContext.current
-    // The activity and the IME write the same preferences.
-    // Observe them even while trying the keyboard inside this page.
+    // The activity, bubble service and IME write the same preferences.
     var revision by remember { mutableIntStateOf(0) }
     DisposableEffect(context) {
-        val stores = listOf("speech", "typing").map { context.getSharedPreferences(it, Context.MODE_PRIVATE) }
+        val stores = listOf("speech", "typing", "bubble", "bubble_history").map { context.getSharedPreferences(it, Context.MODE_PRIVATE) }
         val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> revision++ }
         stores.forEach { it.registerOnSharedPreferenceChangeListener(changed) }
         onDispose { stores.forEach { it.unregisterOnSharedPreferenceChangeListener(changed) } }
@@ -105,8 +116,13 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
     val spokenPunctuation = remember(revision) { speech.spokenPunctuation }
     val customVocabulary = remember(revision) { speech.customVocabulary }
     var vocabularyDraft by remember { mutableStateOf(speech.vocabularyTerms.joinToString("\n")) }
+    val wordReplacements = remember(revision) { speech.wordReplacements }
+    var replacementsDraft by remember { mutableStateOf(speech.replacementsRaw) }
     val signature = remember(revision) { speech.signature }
     var signatureDraft by remember { mutableStateOf(speech.signatureText) }
+    val recentHistory = remember(revision) { bubble.recentHistory }
+    val bubbleEnabled = remember(revision) { bubble.enabled }
+    val usesBubble = remember(revision) { bubble.usesBubble }
     val emojiSuggestions = remember(revision) { typing.emojiSuggestions }
     val keyboardTools = remember(revision) { typing.keyboardTools }
     // A hidden field or leaving Labs shows the saved line again, never an unsaved draft.
@@ -170,7 +186,7 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
                             lines = 2, mod = Modifier.semantics { heading() })
                     }
                     if (page == Page.Home) {
-                        val steps = listOf(setup.mic, setup.chosen).count { !it }
+                        val steps = setup.missingSteps
                         val status = if (steps == 0) stringResource(R.string.home_ready) else pluralStringResource(R.plurals.home_finish_setup, steps, steps)
                         Row((if (steps > 0) Modifier.clickable(role = Role.Button) { setupPage(1) } else Modifier)
                             .heightIn(min = if (steps > 0) 44.dp else 26.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -201,7 +217,6 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
                             transcriptCut = transcriptCard!!.height < it.size.height - 1 || transcriptCard!!.width < it.size.width - 1
                         }) {
                             SelectionContainer { Label(transcript, mod = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp), lines = Int.MAX_VALUE) }
-                            // iPhone Hex's Copy and Clear. Android 13 and later show their own copied preview.
                             Row(Modifier.padding(horizontal = 4.dp)) {
                                 Action(stringResource(if (copied) R.string.home_copied else R.string.home_copy)) {
                                     context.getSystemService(ClipboardManager::class.java)
@@ -212,20 +227,56 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
                             }
                         }
                         if (notice != null) Label(notice, muted = true, size = 14, lines = 3)
+                        if (usesBubble && setup.accessibility) {
+                            Card {
+                                Toggle(
+                                    stringResource(R.string.settings_bubble),
+                                    stringResource(if (bubbleEnabled) R.string.home_bubble_on_detail else R.string.home_bubble_off_detail),
+                                    bubbleEnabled
+                                ) { on ->
+                                    bubble.enabled = on
+                                    if (on && setup.mic) BubbleDictationService.start(context)
+                                    else if (!on) BubbleDictationService.stop(context)
+                                    HexAccessibilityService.instance?.refreshBubble()
+                                }
+                            }
+                        }
                         Updates.HomeCard()
                         Card {
-                            listOf(Page.Dictation, Page.Keyboard, Page.Privacy, Page.Labs).forEachIndexed { i, dest ->
+                            val destinations = buildList {
+                                add(Page.Bubble)
+                                add(Page.Dictation)
+                                add(Page.Keyboard)
+                                if (recentHistory) add(Page.History)
+                                add(Page.Privacy)
+                                add(Page.Labs)
+                            }
+                            destinations.forEachIndexed { i, dest ->
                                 if (i != 0) Rule()
                                 Entry(stringResource(dest.title), action = { open(dest) })
                             }
                         }
                         Card {
+                            if (usesBubble) {
+                                Entry(stringResource(R.string.home_accessibility_settings), value = "↗",
+                                    action = { openAccessibilitySettings(context) })
+                                Rule()
+                            }
                             Entry(stringResource(R.string.home_keyboard_settings), value = "↗", action = systemSettings)
                             Rule(); Entry(stringResource(R.string.home_run_setup), action = { setupPage(0) })
                             if (Feedback.available) { Rule(); Entry(stringResource(R.string.feedback_send_feedback), action = ::sendFeedback) }
                         }
                         Updates.SettingsCard()
                     }
+                    Page.Bubble -> BubbleSettingsContent(
+                        setup = setup,
+                        bubble = bubble,
+                        revision = revision,
+                        openSoundSets = { open(Page.SoundSets) },
+                        openAccessibility = { openAccessibilitySettings(context) }
+                    )
+                    Page.SoundSets -> SoundSetsPage(bubble = bubble, revision = revision, done = { open(Page.Bubble) })
+                    Page.History -> RecentDictationsPage(revision = revision)
                     Page.Dictation -> {
                         Card {
                             Entry(stringResource(R.string.settings_style), value = stringResource(style.label), action = { open(Page.Styles) })
@@ -253,6 +304,18 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
                                     textStyle = TextStyle(color = ink, fontFamily = inter, fontSize = 16.sp),
                                     cursorBrush = SolidColor(ink), decorationBox = { field ->
                                         Box { if (vocabularyDraft.isEmpty()) Label(stringResource(R.string.dictation_vocabulary_hint), muted = true); field() }
+                                    })
+                            }
+                            Rule(); Toggle(stringResource(R.string.dictation_replacements), stringResource(R.string.dictation_replacements_detail),
+                                wordReplacements) { speech.wordReplacements = it }
+                            if (wordReplacements) {
+                                val ink = colorResource(R.color.ink)
+                                BasicTextField(value = replacementsDraft, onValueChange = {
+                                    replacementsDraft = it; speech.replacementsRaw = it
+                                }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 14.dp),
+                                    textStyle = TextStyle(color = ink, fontFamily = inter, fontSize = 16.sp),
+                                    cursorBrush = SolidColor(ink), decorationBox = { field ->
+                                        Box { if (replacementsDraft.isEmpty()) Label(stringResource(R.string.dictation_replacements_hint), muted = true); field() }
                                     })
                             }
                         }
@@ -330,6 +393,12 @@ internal fun HexSettings(setup: Setup, speech: SpeechPreferences, typing: Typing
                                             Signature.Problem.Length -> R.string.signature_too_long
                                         }), size = 13, muted = true)
                                     }
+                                }
+                                Rule()
+                                Toggle(stringResource(R.string.labs_recent_dictations), stringResource(R.string.labs_recent_dictations_detail),
+                                    recentHistory) { on ->
+                                    bubble.recentHistory = on
+                                    if (!on) DictationHistory.clear(context)
                                 }
                             }
                             Label(stringResource(R.string.labs_keyboard), muted = true, size = 14,

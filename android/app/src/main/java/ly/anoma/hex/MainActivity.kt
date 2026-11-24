@@ -2,9 +2,11 @@ package ly.anoma.hex
 
 import android.Manifest
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.database.ContentObserver
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -16,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -26,6 +29,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -33,6 +37,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -40,21 +45,45 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
 import kotlinx.coroutines.delay
+import ly.anoma.hex.bubble.BubbleDictationService
+import ly.anoma.hex.bubble.BubblePreferences
+import ly.anoma.hex.bubble.HexAccessibilityService
+import ly.anoma.hex.bubble.InputMode
 import ly.anoma.hex.keyboard.speechNote
 import ly.anoma.hex.speech.*
 import ly.anoma.hex.typing.TypingPreferences
 import ly.anoma.hex.updates.Updates
 
-internal data class Setup(val mic: Boolean = false, val enabled: Boolean = false, val chosen: Boolean = false,
-                         val micNeedsSettings: Boolean = false) {
-    val ready get() = mic && enabled && chosen
+internal data class Setup(
+    val mic: Boolean = false,
+    val accessibility: Boolean = false,
+    val notifications: Boolean = true,
+    val enabled: Boolean = false,
+    val chosen: Boolean = false,
+    val micNeedsSettings: Boolean = false,
+    val askedAccessibility: Boolean = false,
+    val mode: InputMode = InputMode.Bubble,
+) {
+    val bubbleReady get() = mic && accessibility
+    val keyboardReady get() = mic && enabled && chosen
+    val ready get() = when (mode) {
+        InputMode.Bubble -> bubbleReady
+        InputMode.Keyboard -> keyboardReady
+        InputMode.Both -> bubbleReady && keyboardReady
+    }
+    val missingSteps get() = when (mode) {
+        InputMode.Bubble -> listOf(mic, accessibility).count { !it }
+        InputMode.Keyboard -> listOf(mic, chosen).count { !it }
+        InputMode.Both -> listOf(mic, accessibility, chosen).count { !it }
+    }
 }
 
 class MainActivity : ComponentActivity() {
     companion object {
-        /** The keyboard's Settings tool opens Hex on this page, not Home: [PAGE_KEYBOARD] names it. */
+        /** Deep-link extra for opening Hex directly on Keyboard or Bubble settings. */
         const val EXTRA_PAGE = "ly.anoma.hex.extra.page"
         const val PAGE_KEYBOARD = "keyboard"
+        const val PAGE_BUBBLE = "bubble"
     }
     private val prefs by lazy { getSharedPreferences("setup", MODE_PRIVATE) }
     private val imm by lazy { getSystemService(InputMethodManager::class.java) }
@@ -62,46 +91,57 @@ class MainActivity : ComponentActivity() {
     private var page by mutableIntStateOf(0)
     private val speech by lazy { SpeechPreferences(this) }
     private val typing by lazy { TypingPreferences(this) }
+    private val bubble by lazy { BubblePreferences(this) }
     private var phase by mutableStateOf(SpeechPhase.Idle)
     private var transcript by mutableStateOf("")
     private var notice by mutableStateOf<String?>(null)
     /** Enable was tapped: back from Android's keyboard list with Hex on, the keyboard picker opens by itself. */
     private var enabling = false
+    private var askedAccessibility = false
     private lateinit var capture: MicCapture
     private val changed = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean) = refresh()
     }
+    private val bubbleChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "input_mode") refresh()
+    }
     private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         capture = MicCapture(LocalSpeech(applicationContext),
             update = { next, reason -> phase = next; notice = speechNote(reason) },
-            meter = {}, insert = { text, _ -> transcript = text })
+            meter = {}, insert = { text, _ -> transcript = text }, appContext = applicationContext)
+        askedAccessibility = savedInstanceState?.getBoolean("asked_accessibility", false) ?: false
         page = prefs.getInt("page", 0).coerceIn(0, 3)
-        // The keyboard's Settings tool opens Hex on its Keyboard page for the launch that carried the extra.
-        // The task keeps its base intent, so a Recents relaunch still carries it: a restored or history
-        // launch ignores it.
         val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
         val startPage = if (savedInstanceState == null && !fromHistory) intent.getStringExtra(EXTRA_PAGE) else null
+        if (startPage != null) page = 3
         intent.removeExtra(EXTRA_PAGE)
-        // Debug builds only: am start --ez feedback_drop_first_response true loses Send feedback's first answer, to
-        // show that the retry, with the same Idempotency-Key, gets the same issue back.
         if (BuildConfig.DEBUG) ly.anoma.hex.feedback.Feedback.dropFirstResponse = intent.getBooleanExtra("feedback_drop_first_response", false)
-        for (name in listOf(Settings.Secure.DEFAULT_INPUT_METHOD, Settings.Secure.ENABLED_INPUT_METHODS))
+        for (name in listOf(
+            Settings.Secure.DEFAULT_INPUT_METHOD,
+            Settings.Secure.ENABLED_INPUT_METHODS,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        )) {
             contentResolver.registerContentObserver(Settings.Secure.getUriFor(name), false, changed)
+        }
+        getSharedPreferences("bubble", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(bubbleChanged)
         refresh()
         ModelStore.refresh(this)
         setContent {
             HexTheme {
                 BackHandler(page in 1..2) { go(page - 1) }
                 val model = ModelStore.state.collectAsState().value
-                if (page == 3) HexSettings(setup, speech, typing, model, { ModelStore.download(this) },
+                if (page == 3) HexSettings(setup, speech, typing, bubble, model, { ModelStore.download(this) },
                     phase, transcript, notice, ::dictate, capture::cancel, { transcript = "" }, { go(it) },
                     { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
                     startPage = startPage)
-                else SetupScreen(page, setup, ::go, ::askForMic,
+                else SetupScreen(page, setup, ::go, ::askForMic, ::askForNotifications,
+                    setMode = { mode -> bubble.inputMode = mode; refresh() },
+                    openAccessibility = ::openAccessibilityOrAppInfo,
                     enable = { enabling = true; startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
                     choose = { imm.showInputMethodPicker() }, model = model,
                     download = { ModelStore.download(this) })
@@ -109,10 +149,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("asked_accessibility", askedAccessibility)
+    }
+
     private fun dictate() {
         when (phase) {
             SpeechPhase.Idle -> if (setup.mic) {
-                transcript = ""; capture.start(speech.options(null))
+                transcript = ""; capture.start(speech.options(null, duckAudio = bubble.duckAudio))
             } else askForMic()
             SpeechPhase.Opening, SpeechPhase.Listening -> capture.finish()
             SpeechPhase.Transcribing -> Unit
@@ -127,8 +172,24 @@ class MainActivity : ComponentActivity() {
         val id = imm.enabledInputMethodList.firstOrNull { it.packageName == packageName }?.id
         val selected = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
         val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        setup = Setup(granted, id != null, id != null && id == selected,
-            prefs.getBoolean("asked", false) && !granted && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO))
+        val notifGranted = Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val accOn = HexAccessibilityService.isEnabledInSettings(this)
+        if (accOn) askedAccessibility = false
+        val mode = bubble.inputMode
+        setup = Setup(
+            mic = granted,
+            accessibility = accOn,
+            notifications = notifGranted,
+            enabled = id != null,
+            chosen = id != null && id == selected,
+            micNeedsSettings = prefs.getBoolean("asked", false) && !granted && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+            askedAccessibility = askedAccessibility,
+            mode = mode,
+        )
+        if (granted && accOn && bubble.enabled && bubble.usesBubble && !BubbleDictationService.running) {
+            BubbleDictationService.start(this)
+        }
     }
 
     private fun askForMic() {
@@ -138,14 +199,29 @@ class MainActivity : ComponentActivity() {
             permission.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
+
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT >= 33) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun openAccessibilityOrAppInfo() {
+        if (askedAccessibility && Build.VERSION.SDK_INT >= 33 && !setup.accessibility) {
+            askedAccessibility = false
+            refresh()
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } else {
+            askedAccessibility = true
+            refresh()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
     override fun onResume() { super.onResume(); refresh(); Updates.appOpened(this) }
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) return
         refresh()
-        // Android asks for two steps (turn Hex on, then pick it); this saves the second tap. Android only shows
-        // the picker to the window it already treats as focused, which it learns just after this call.
-        if (enabling && page == 1) {
+        if (enabling && page == 1 && setup.mode != InputMode.Bubble) {
             enabling = false
             if (setup.enabled && !setup.chosen) window.decorView.postDelayed({
                 if (hasWindowFocus() && page == 1 && !setup.chosen) imm.showInputMethodPicker()
@@ -153,7 +229,12 @@ class MainActivity : ComponentActivity() {
         }
     }
     override fun onStop() { capture.cancel(); super.onStop() }
-    override fun onDestroy() { capture.close(); contentResolver.unregisterContentObserver(changed); super.onDestroy() }
+    override fun onDestroy() {
+        capture.close()
+        contentResolver.unregisterContentObserver(changed)
+        getSharedPreferences("bubble", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(bubbleChanged)
+        super.onDestroy()
+    }
 }
 
 @Composable
@@ -167,11 +248,13 @@ private fun HexTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SetupScreen(page: Int, setup: Setup, go: (Int) -> Unit, ask: () -> Unit,
+private fun SetupScreen(page: Int, setup: Setup, go: (Int) -> Unit, ask: () -> Unit, askNotifications: () -> Unit,
+                        setMode: (InputMode) -> Unit, openAccessibility: () -> Unit,
                         enable: () -> Unit, choose: () -> Unit, model: ModelStore.State, download: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     var text by remember(page) { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
+    val useBubble = setup.mode != InputMode.Keyboard
     Surface(Modifier.fillMaxSize()) {
         Box(Modifier.safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
             Column(Modifier.widthIn(max = 520.dp).fillMaxWidth().fillMaxHeight().padding(horizontal = 24.dp)) {
@@ -194,36 +277,89 @@ private fun SetupScreen(page: Int, setup: Setup, go: (Int) -> Unit, ask: () -> U
                             Welcome()
                         }
                         1 -> {
-                            // Moves on by itself once the last row is done here, as iPhone Hex's setup does
-                            // (not when Back returns to a page that was already done).
-                            var wasReady by remember { mutableStateOf(setup.ready) }
-                            LaunchedEffect(setup.ready) {
+                            var wasReady by remember(setup.mode) { mutableStateOf(setup.ready) }
+                            LaunchedEffect(setup.ready, setup.mode) {
                                 if (setup.ready && !wasReady) { delay(800); go(2) }
                                 wasReady = setup.ready
                             }
                             Spacer(Modifier.height(26.dp))
                             Heading(stringResource(R.string.setup_title))
-                            Detail(stringResource(R.string.setup_detail))
-                            Spacer(Modifier.height(24.dp))
+                            Detail(stringResource(if (useBubble) R.string.setup_detail_bubble else R.string.setup_detail))
+                            Spacer(Modifier.height(18.dp))
+                            // Choose between keeping your current keyboard (Floating bubble) or switching to Hex keyboard.
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(colors.surfaceVariant)
+                                    .padding(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                listOf(
+                                    InputMode.Bubble to stringResource(R.string.setup_mode_bubble),
+                                    InputMode.Keyboard to stringResource(R.string.setup_mode_keyboard),
+                                ).forEach { (modeChoice, label) ->
+                                    val active = (modeChoice == InputMode.Bubble && useBubble) ||
+                                        (modeChoice == InputMode.Keyboard && !useBubble)
+                                    Box(
+                                        Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(9.dp))
+                                            .background(if (active) colors.primary else colors.surfaceVariant)
+                                            .clickable(role = Role.RadioButton) { setMode(modeChoice) }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            label,
+                                            color = if (active) colors.onPrimary else colors.onSurface,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(16.dp))
                             Column(Modifier.fillMaxWidth().background(colors.surfaceVariant, RoundedCornerShape(16.dp))
                                 .padding(horizontal = 16.dp)) {
                                 SetupRow(stringResource(R.string.setup_microphone), stringResource(R.string.setup_microphone_detail), setup.mic,
                                     stringResource(if (setup.micNeedsSettings) R.string.setup_settings else R.string.setup_allow), ask)
                                 HorizontalDivider(color = colors.outline)
-                                SetupRow(stringResource(R.string.setup_keyboard), stringResource(when {
-                                    setup.chosen -> R.string.setup_keyboard_chosen
-                                    setup.enabled -> R.string.setup_keyboard_enabled
-                                    else -> R.string.setup_keyboard_off
-                                }), setup.chosen, stringResource(if (setup.enabled) R.string.setup_choose else R.string.setup_enable),
-                                    if (setup.enabled) choose else enable)
+                                if (useBubble) {
+                                    val restrictedHint = setup.askedAccessibility && Build.VERSION.SDK_INT >= 33 && !setup.accessibility
+                                    SetupRow(
+                                        stringResource(R.string.setup_bubble),
+                                        stringResource(if (restrictedHint) R.string.setup_bubble_restricted else R.string.setup_bubble_detail),
+                                        setup.accessibility,
+                                        stringResource(if (restrictedHint) R.string.setup_app_info else R.string.setup_enable),
+                                        openAccessibility
+                                    )
+                                    if (Build.VERSION.SDK_INT >= 33) {
+                                        HorizontalDivider(color = colors.outline)
+                                        SetupRow(
+                                            stringResource(R.string.setup_notifications),
+                                            stringResource(R.string.setup_notifications_detail),
+                                            setup.notifications,
+                                            stringResource(R.string.setup_allow),
+                                            askNotifications
+                                        )
+                                    }
+                                } else {
+                                    SetupRow(stringResource(R.string.setup_keyboard), stringResource(when {
+                                        setup.chosen -> R.string.setup_keyboard_chosen
+                                        setup.enabled -> R.string.setup_keyboard_enabled
+                                        else -> R.string.setup_keyboard_off
+                                    }), setup.chosen, stringResource(if (setup.enabled) R.string.setup_choose else R.string.setup_enable),
+                                        if (setup.enabled) choose else enable)
+                                }
                                 HorizontalDivider(color = colors.outline)
                                 ModelRow(model, download)
                             }
                         }
                         2 -> {
                             Spacer(Modifier.height(16.dp))
-                            Heading(stringResource(R.string.setup_try_title))
-                            Detail(stringResource(R.string.setup_try_detail))
+                            Heading(stringResource(if (useBubble) R.string.setup_try_bubble_title else R.string.setup_try_title))
+                            Detail(stringResource(if (useBubble) R.string.setup_try_bubble_detail else R.string.setup_try_detail))
                             Spacer(Modifier.height(20.dp))
                             val focus = remember { FocusRequester() }
                             OutlinedTextField(value = text, onValueChange = { text = it },
@@ -235,7 +371,7 @@ private fun SetupScreen(page: Int, setup: Setup, go: (Int) -> Unit, ask: () -> U
                             LaunchedEffect(windowFocused) {
                                 if (windowFocused) { focus.requestFocus(); keyboard?.show() }
                             }
-                            if (!setup.chosen) TextButton(onClick = choose) { Text(stringResource(R.string.setup_choose_hex)) }
+                            if (!useBubble && !setup.chosen) TextButton(onClick = choose) { Text(stringResource(R.string.setup_choose_hex)) }
                         }
                     }
                 }

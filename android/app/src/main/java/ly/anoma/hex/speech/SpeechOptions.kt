@@ -2,6 +2,7 @@ package ly.anoma.hex.speech
 
 import android.content.Context
 import android.content.res.Resources
+import android.provider.Settings
 
 internal enum class Style { Polished, Casual, Notes, Verbatim }
 /** A keyboard layout's language: its keys, accents and typing model. Dictation languages are
@@ -37,11 +38,13 @@ internal enum class DictationLanguage(val code: String, val label: String, val l
             "no", "nb", "nn" -> Norwegian
             else -> entries.firstOrNull { it.code == code }
         }
-        /** Automatic: the keyboard's layout when one is chosen there, as iPhone dictation follows the
-         * keyboard's language, else the first of the phone's languages Hex dictates, else English. */
+        /** Automatic: the keyboard's layout when Hex's keyboard is active and a layout is chosen there,
+         * else the first of the phone's languages Hex dictates, else English. */
         fun automatic(keyboard: Spoken?, system: List<String>): DictationLanguage =
             entries.firstOrNull { keyboard != null && it.layout == keyboard }
                 ?: system.firstNotNullOfOrNull(::matching) ?: English
+        /** Whether Whisper can translate speech in [spoken] directly into English. */
+        fun canTranslateToEnglish(spoken: DictationLanguage): Boolean = spoken != English
     }
 }
 
@@ -53,8 +56,11 @@ internal fun typingLayout(pinned: Spoken?, spoken: DictationLanguage): Spoken? =
 internal data class SpeechOptions(val style: Style, val spoken: DictationLanguage, val clean: Boolean, val translate: Boolean,
                                    val lowercase: Boolean = false, val endWithPeriod: Boolean = true,
                                    val formatLists: Boolean = false, val spokenPunctuation: Boolean = false,
-                                   val vocabulary: List<String> = emptyList())
-internal class SpeechPreferences(context: Context) {
+                                   val vocabulary: List<String> = emptyList(),
+                                   val replacements: List<TextReplacements.Rule> = emptyList(),
+                                   val duckAudio: Boolean = false)
+internal class SpeechPreferences(private val appContext: Context) {
+    private val context = appContext.applicationContext
     private val prefs = context.getSharedPreferences("speech", Context.MODE_PRIVATE)
     var style: Style
         get() = Style.entries.firstOrNull { it.name == prefs.getString("style", null) } ?: Style.Polished
@@ -63,11 +69,18 @@ internal class SpeechPreferences(context: Context) {
     var language: DictationLanguage?
         get() = DictationLanguage.matching(prefs.getString("spoken", null))
         set(value) { prefs.edit().putString("spoken", value?.code).apply() }
-    // Keyboard › Keyboard layout when chosen there (null while the layout follows dictation).
+    // Keyboard › Keyboard layout only guides Automatic while Hex's own keyboard is the active input method;
+    // when dictating through the floating bubble over SwiftKey or another keyboard, Automatic follows the phone's language.
     private val typing = context.getSharedPreferences("typing", Context.MODE_PRIVATE)
+    private val bubble = context.getSharedPreferences("bubble", Context.MODE_PRIVATE)
+    private fun hexImeActive(): Boolean = runCatching {
+        val current = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+        current != null && current.startsWith("${context.packageName}/")
+    }.getOrDefault(false)
     val spoken: DictationLanguage
         get() = language ?: Resources.getSystem().configuration.locales.let { locales ->
-            DictationLanguage.automatic(Spoken.matching(typing.getString("layout", null)), (0 until locales.size()).map { locales[it].language })
+            val layout = if (hexImeActive()) Spoken.matching(typing.getString("layout", null)) else null
+            DictationLanguage.automatic(layout, (0 until locales.size()).map { locales[it].language })
         }
     var clean: Boolean
         get() = prefs.getBoolean("clean", false)
@@ -98,7 +111,16 @@ internal class SpeechPreferences(context: Context) {
     var vocabularyTerms: List<String>
         get() = prefs.getString("vocabularyTerms", null)?.split('\n').orEmpty().filter(String::isNotEmpty)
         set(value) { prefs.edit().putString("vocabularyTerms", VocabularySpelling.sanitize(value).joinToString("\n")).apply() }
-    // Labs › Signature: the line added to each keyboard dictation, off by default.
+    // Word replacements (`phrase => output`), kept even while the switch is off.
+    var wordReplacements: Boolean
+        get() = prefs.getBoolean("wordReplacements", false)
+        set(value) { prefs.edit().putBoolean("wordReplacements", value).apply() }
+    var replacementsRaw: String
+        get() = prefs.getString("replacementsRaw", null).orEmpty()
+        set(value) { prefs.edit().putString("replacementsRaw", value).apply() }
+    val replacementRules: List<TextReplacements.Rule>
+        get() = TextReplacements.parse(replacementsRaw)
+    // Labs › Signature: the line added to each keyboard or bubble dictation, off by default.
     var signature: Boolean
         get() = prefs.getBoolean("signature", false)
         set(value) { prefs.edit().putBoolean("signature", value).apply() }
@@ -106,7 +128,17 @@ internal class SpeechPreferences(context: Context) {
         get() = prefs.getString("signatureText", Signature.DEFAULT_TEXT)
             ?.takeIf { Signature.textProblem(it) == null }?.trim() ?: Signature.DEFAULT_TEXT
         set(value) { prefs.edit().putString("signatureText", value).apply() }
-    fun options(nextEnglish: Boolean?) = SpeechOptions(style, spoken, clean,
-        translation && spoken == DictationLanguage.Spanish && (nextEnglish ?: true), lowercase, endWithPeriod, formatLists, spokenPunctuation,
-        if (customVocabulary) vocabularyTerms else emptyList())
+    fun options(nextEnglish: Boolean?, duckAudio: Boolean = bubble.getBoolean("duck_audio", false)) = SpeechOptions(
+        style = style,
+        spoken = spoken,
+        clean = clean,
+        translate = translation && DictationLanguage.canTranslateToEnglish(spoken) && (nextEnglish ?: true),
+        lowercase = lowercase,
+        endWithPeriod = endWithPeriod,
+        formatLists = formatLists,
+        spokenPunctuation = spokenPunctuation,
+        vocabulary = if (customVocabulary) vocabularyTerms else emptyList(),
+        replacements = if (wordReplacements) replacementRules else emptyList(),
+        duckAudio = duckAudio,
+    )
 }
