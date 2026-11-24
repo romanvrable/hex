@@ -84,13 +84,16 @@ val previewChannel = providers.gradleProperty("hexPreviewChannel").orNull
 val feedbackKey = providers.gradleProperty("hexFeedbackKey").orNull?.trim().orEmpty()
 check(feedbackKey.isEmpty() || Regex("bh_pub_[0-9a-f]{64}").matches(feedbackKey)) { "hexFeedbackKey must be a Bellhop report key (bh_pub_…)" }
 
+val appId = providers.gradleProperty("hexApplicationId").orNull?.trim()?.takeIf { it.isNotEmpty() }
+    ?: "io.github.romanvrable.hex"
+
 android {
     namespace = "ly.anoma.hex"
     compileSdk = 36
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "ly.anoma.hex"
+        applicationId = appId
         minSdk = 31
         targetSdk = 36
         versionCode = 5
