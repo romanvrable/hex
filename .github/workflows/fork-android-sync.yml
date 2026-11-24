@@ -1,0 +1,269 @@
+name: Sync Upstream & Release Android Bubble
+
+# Automatically keeps romanvrable/hex synced with upstream anomalyco/hex (dev),
+# verifies Android unit tests + lint + release build before landing Android merges,
+# and publishes signed APKs (io.github.romanvrable.hex) with monotonically
+# increasing versionCodes so updates install cleanly in place.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  push:
+    branches: [dev]
+    paths:
+      - "android/**"
+      - ".github/workflows/fork-android-sync.yml"
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Build and publish an APK release even if no new Android commits arrived"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-android-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-and-release:
+    name: Sync upstream & build Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EXPECTED_CERT_SHA256: "6e15649bef53454faaa68698cfee795eee2cc10030ca9b8676125b3b321034be"
+    steps:
+      - name: Checkout fork dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge upstream anomalyco/hex dev
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          prev_tag="$(git tag --list 'android-v*' --sort=-creatordate | head -n 1 || true)"
+          echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git remote add upstream https://github.com/anomalyco/hex.git
+          git fetch upstream dev --quiet
+          upstream_sha="$(git rev-parse --short=10 upstream/dev)"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor upstream/dev HEAD; then
+            echo "Already up to date with upstream/dev ($upstream_sha)."
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            if [ "$FORCE_RELEASE" = "true" ] || [ -z "$prev_tag" ]; then
+              echo "need_build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "need_build=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          before_sha="$(git rev-parse HEAD)"
+          set +e
+          git merge --no-edit upstream/dev
+          merge_rc=$?
+          set -e
+
+          if [ "$merge_rc" -ne 0 ]; then
+            conflicts="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort || true
+            title="[Upstream Sync] Merge conflict with anomalyco/hex ($upstream_sha)"
+            existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "[Upstream Sync] Merge conflict in:title" --json number --jq '.[0].number // empty')"
+            body="$(printf 'Automatic merge of `anomalyco/hex@%s` into `dev` hit conflicts in:\n\n```\n%s\n```\n\nCompare: https://github.com/%s/compare/dev...anomalyco:hex:dev\n' "$upstream_sha" "$conflicts" "$GITHUB_REPOSITORY")"
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$body"
+            else
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
+            fi
+            echo "::error::Merge conflict with upstream/dev ($upstream_sha); opened/updated tracking issue."
+            exit 1
+          fi
+
+          echo "synced=true" >> "$GITHUB_OUTPUT"
+          android_diff="$(git diff --name-only "$before_sha" HEAD -- android/)"
+          if [ -n "$android_diff" ] || [ "$FORCE_RELEASE" = "true" ] || [ -z "$prev_tag" ]; then
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No android/ changes in upstream merge; pushing synced dev without rebuilding APK."
+            git push origin HEAD:dev
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        if: steps.sync.outputs.need_build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install Android SDK 36 & NDK 27.2.12479018
+        if: steps.sync.outputs.need_build == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build patch >/dev/null
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          (yes || true) | "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" --licenses >/dev/null
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1" >/dev/null
+
+      - name: Stage release keystore
+        if: steps.sync.outputs.need_build == 'true'
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ks_dir="$RUNNER_TEMP/hex-keystore"
+          mkdir -p "$ks_dir"
+          chmod 700 "$ks_dir"
+          printf '%s' "$KS_B64" | base64 --decode > "$ks_dir/release.jks"
+          chmod 600 "$ks_dir/release.jks"
+          {
+            printf 'storeFile=release.jks\n'
+            printf 'keyAlias=%s\n' "$KS_ALIAS"
+            printf 'storePassword=%s\n' "$KS_STORE_PW"
+            printf 'keyPassword=%s\n' "$KS_KEY_PW"
+          } > "$ks_dir/keystore.properties"
+          chmod 600 "$ks_dir/keystore.properties"
+          echo "HEX_ANDROID_KEYSTORE_PROPERTIES=$ks_dir/keystore.properties" >> "$GITHUB_ENV"
+
+      - name: Test, lint, and build signed release APK
+        if: steps.sync.outputs.need_build == 'true'
+        id: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNCED: ${{ steps.sync.outputs.synced }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          build_num="$(git rev-list --count HEAD)"
+          base_ver="$(sed -n 's/^val appVersionName = .* ?: "\([^"]*\)"/\1/p' android/app/build.gradle.kts | head -n 1)"
+          [ -n "$base_ver" ] || base_ver="0.2.2"
+          full_ver="${base_ver}+b${build_num}"
+          tag="android-v${base_ver}-b${build_num}"
+          apk_name="hex-android-bubble-${base_ver}-b${build_num}.apk"
+
+          chmod +x android/gradlew
+          set +e
+          (
+            cd android
+            ./gradlew --no-daemon --console=plain \
+              testReleaseUnitTest lintVitalRelease assembleRelease \
+              -PhexVersionCode="$build_num" \
+              -PhexVersionName="$full_ver"
+          )
+          gradle_rc=$?
+          set -e
+
+          if [ "$gradle_rc" -ne 0 ]; then
+            if [ "$SYNCED" = "true" ]; then
+              title="[Upstream Sync] Android build/test failed after merging $UPSTREAM_SHA"
+              existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "[Upstream Sync] Android build/test failed in:title" --json number --jq '.[0].number // empty')"
+              body="Merging \`anomalyco/hex@$UPSTREAM_SHA\` succeeded at the git level, but \`testReleaseUnitTest lintVitalRelease assembleRelease\` failed in run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. \`dev\` was kept at its previous working commit."
+              if [ -n "$existing" ]; then
+                gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$body"
+              else
+                gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
+              fi
+            fi
+            exit "$gradle_rc"
+          fi
+
+          built_apk="android/app/build/outputs/apk/release/app-release.apk"
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          cert_info="$("$apksigner" verify --print-certs "$built_apk")"
+          actual_cert="$(printf '%s\n' "$cert_info" | awk '/Signer #1 certificate SHA-256 digest:/ {print tolower($NF)}')"
+          if [ "$actual_cert" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error::Signing certificate mismatch: got $actual_cert, expected $EXPECTED_CERT_SHA256"
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp "$built_apk" "dist/$apk_name"
+          (cd dist && sha256sum "$apk_name" > SHA256SUMS.txt)
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "full_ver=$full_ver" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$apk_name" >> "$GITHUB_OUTPUT"
+
+      - name: Push verified merge & publish GitHub Release
+        if: steps.sync.outputs.need_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNCED: ${{ steps.sync.outputs.synced }}
+          PREV_TAG: ${{ steps.sync.outputs.prev_tag }}
+          TAG: ${{ steps.build.outputs.tag }}
+          FULL_VER: ${{ steps.build.outputs.full_ver }}
+          APK_NAME: ${{ steps.build.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+          if [ "$SYNCED" = "true" ]; then
+            git push origin HEAD:dev
+          fi
+
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping duplicate release creation."
+            exit 0
+          fi
+
+          apk_sha="$(awk '{print $1}' dist/SHA256SUMS.txt)"
+          commit_sha="$(git rev-parse --short=10 HEAD)"
+          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG^{commit}" >/dev/null 2>&1; then
+            changes="$(git log --oneline "$PREV_TAG..HEAD" -- android/ | head -n 30 || true)"
+          else
+            changes="$(git log --oneline -n 15 HEAD -- android/ || true)"
+          fi
+          [ -n "$changes" ] || changes="- Rebuilt from \`$commit_sha\`"
+
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          {
+            printf '## Hex for Android — Floating Bubble + Official Local Whisper STT (`%s`)\n\n' "$FULL_VER"
+            printf -- '- **App ID:** `io.github.romanvrable.hex` (installs cleanly over previous fork releases while keeping Accessibility & Restricted Settings enabled)\n'
+            printf -- '- **Commit:** `%s`\n' "$commit_sha"
+            printf -- '- **APK SHA-256:** `%s`\n' "$apk_sha"
+            printf -- '- **Signing Cert SHA-256:** `%s`\n\n' "$EXPECTED_CERT_SHA256"
+            printf '### Recent `android/` commits\n```\n%s\n```\n' "$changes"
+          } > "$notes_file"
+
+          gh release create "$TAG" \
+            "dist/$APK_NAME" \
+            "dist/SHA256SUMS.txt" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "$(git rev-parse HEAD)" \
+            --title "Hex Android Bubble $FULL_VER" \
+            --notes-file "$notes_file" \
+            --latest
+
+      - name: Clean up temporary keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/hex-keystore"

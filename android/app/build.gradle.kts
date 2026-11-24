@@ -86,6 +86,8 @@ check(feedbackKey.isEmpty() || Regex("bh_pub_[0-9a-f]{64}").matches(feedbackKey)
 
 val appId = providers.gradleProperty("hexApplicationId").orNull?.trim()?.takeIf { it.isNotEmpty() }
     ?: "io.github.romanvrable.hex"
+val appVersionCode = providers.gradleProperty("hexVersionCode").orNull?.trim()?.toIntOrNull() ?: 5
+val appVersionName = providers.gradleProperty("hexVersionName").orNull?.trim()?.takeIf { it.isNotEmpty() } ?: "0.2.2"
 
 android {
     namespace = "ly.anoma.hex"
@@ -96,8 +98,8 @@ android {
         applicationId = appId
         minSdk = 31
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.2.2"
+        versionCode = appVersionCode
+        versionName = appVersionName
         buildConfigField("String", "FEEDBACK_KEY", "\"$feedbackKey\"")
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild.cmake {
