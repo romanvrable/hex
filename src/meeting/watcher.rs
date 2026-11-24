@@ -48,6 +48,9 @@ pub(crate) enum ControllerCommand {
         id: String,
         entries: Vec<meeting::TranscriptEntryKey>,
     },
+    /// Leave Hex's microphone out of the recording under way, or put it
+    /// back (Labs › Mute the microphone while recording, macOS).
+    SetMicrophoneMuted(bool),
     Summarize(String),
     /// Record a calendar meeting from its reminder, first opening its call
     /// link when `join`.
@@ -105,12 +108,15 @@ pub(crate) enum ControllerEvent {
     Stopping,
     /// Both sources have stopped. The worker is preparing the final transcript.
     Transcribing,
-    /// `auto_stop` when the recording stops on its own after
+    /// `stops_at` when the recording stops on its own then, after
     /// [`crate::meeting::detection::AUTO_STOP_GRACE`] (Stop when the
-    /// call ends).
+    /// call ends or Labs › Stop every call recording when the call ends).
     CallEnded {
         app: String,
-        auto_stop: bool,
+        /// The native call app's bundle ID (macOS) or executable name for
+        /// its icon; `None` for web calls in a browser.
+        application: Option<String>,
+        stops_at: Option<Instant>,
     },
     /// A pending automatic stop was dropped because the call came back
     /// (Labs › Stop when the call ends): its notice goes, and the recording
@@ -158,6 +164,9 @@ struct ActiveRecording {
     stop: Arc<AtomicBool>,
     updates: Receiver<meeting::RecordingUpdate>,
     reported_started: bool,
+    /// A browser's playback stopped counting while the Mac was locked, and
+    /// that was logged once for this recording (#2685); cleared on unlock.
+    playback_locked_noted: bool,
     worker: JoinHandle<Result<meeting::MeetingManifest>>,
 }
 
@@ -181,7 +190,11 @@ fn flush_withdrawn_offers(detector: &mut MeetingDetector, events: &SyncSender<Co
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MeetingMenuState {
     Idle,
-    Starting,
+    Starting {
+        /// Stop was requested while the recorder was still starting: it
+        /// finishes that meeting before it takes another.
+        stopping: bool,
+    },
     Recording {
         started: Instant,
         id: String,
@@ -191,6 +204,10 @@ pub enum MeetingMenuState {
         /// The microphone is digitally silent, as a call app holding it with
         /// voice processing leaves it (#1518).
         warning: Option<TrackWarning>,
+        /// Stop was requested and the capture worker is still closing its
+        /// sources. The recorder holds this recording until it finishes
+        /// transcribing, so nothing new can start yet.
+        stopping: bool,
     },
     Transcribing,
 }
@@ -200,6 +217,17 @@ impl MeetingMenuState {
     pub(crate) fn source_warning(&mut self, warning: Option<TrackWarning>) {
         if let Self::Recording { warning: shown, .. } = self {
             *shown = warning;
+        }
+    }
+
+    /// A stop was requested for what the recorder is doing now. It finishes
+    /// that meeting before it takes another, so nothing new starts until the
+    /// mirror reads `transcribing` or `idle`. Idle has nothing to stop, and
+    /// a transcribing meeting is already past capture.
+    pub(crate) fn stopping_requested(&mut self) {
+        match self {
+            Self::Starting { stopping } | Self::Recording { stopping, .. } => *stopping = true,
+            Self::Idle | Self::Transcribing => {}
         }
     }
 }
@@ -228,6 +256,11 @@ pub(crate) fn controller_loop(
 
     while !shutdown.load(Ordering::Relaxed) {
         let enabled = crate::app_settings::meetings_enabled();
+        // Labs › Mute the microphone while recording off: clear the switch on
+        // the first pass that sees it, so turning the lab back on in the same
+        // recording does not silently mute it again. The sink reads the same
+        // gate with each packet, so audio is already back by then.
+        crate::meeting::capture::reconcile_microphone_mute(crate::labs::meeting_microphone_mute());
         poll_import(&mut importing, &events);
         let requested_commands = meeting_requests
             .try_iter()
@@ -241,6 +274,9 @@ pub(crate) fn controller_loop(
                 MeetingRequest::Import(path) => ControllerCommand::Import(path),
                 MeetingRequest::DeleteTranscript { id, entries } => {
                     ControllerCommand::DeleteTranscript { id, entries }
+                }
+                MeetingRequest::SetMicrophoneMuted(muted) => {
+                    ControllerCommand::SetMicrophoneMuted(muted)
                 }
             });
         for command in commands.try_iter().take(8).chain(requested_commands) {
@@ -494,6 +530,17 @@ fn handle_command(
                 if active.auto_stop.disarm() || changed || page_stop {
                     tracing::info!("kept recording after the call ended");
                 }
+            }
+        }
+        // Labs › Mute the microphone while recording: it acts on the recording
+        // under way, and only while the lab is on.
+        ControllerCommand::SetMicrophoneMuted(muted) => {
+            if crate::meeting::capture::request_microphone_mute(
+                recording.is_some(),
+                crate::labs::meeting_microphone_mute(),
+                muted,
+            ) {
+                tracing::info!(muted, "meeting microphone mute set");
             }
         }
         ControllerCommand::Summarize(id) => start_notes(id, events),
@@ -814,8 +861,9 @@ fn start_recording(
     events: &SyncSender<ControllerEvent>,
 ) {
     // `Starting` closes a showing reminder; no reminder shows over a
-    // recording.
+    // recording. Every recording begins with the microphone in.
     reminders.scheduler.clear();
+    crate::meeting::capture::set_microphone_muted(false);
     if automatic {
         tracing::info!(
             source = start.app_label,
@@ -851,6 +899,7 @@ fn start_recording(
         stop,
         updates,
         reported_started: false,
+        playback_locked_noted: false,
         worker,
     });
 }
@@ -900,6 +949,8 @@ fn poll_recording(
         let active = recording
             .take()
             .ok_or_else(|| eyre!("recording disappeared"))?;
+        // Labs › Mute the microphone while recording ends with its recording.
+        crate::meeting::capture::set_microphone_muted(false);
         match active
             .worker
             .join()
@@ -945,8 +996,31 @@ fn poll_recording(
             crate::app_settings::meeting_stop_when_call_ends(),
             crate::labs::stop_any_call_recording(),
         );
+        // A browser seems to keep its output open after its call while the
+        // Mac is locked (#2685): playback stops counting there, and one note
+        // per recording says so, so the next report shows whether that is
+        // what happened.
+        let locked = crate::audio::system_idle::session_locked();
+        if !locked {
+            active.playback_locked_noted = false;
+        } else if auto_stop
+            && !active.playback_locked_noted
+            && crate::microphone_activity::is_browser_id(Some(application))
+        {
+            active.playback_locked_noted = true;
+            tracing::info!(
+                application,
+                "the Mac is locked; the browser's playback no longer keeps its call present"
+            );
+        }
         let applications = active_microphone_applications();
-        let pass = call_end::watched_pass(application, auto_stop, &applications, call_app_playing);
+        let pass = call_end::watched_pass(
+            application,
+            locked,
+            auto_stop,
+            &applications,
+            call_app_playing,
+        );
         if pass.present {
             detector.keep_snooze_alive();
         }
@@ -970,12 +1044,11 @@ fn poll_recording(
                 auto_stop,
                 "meeting application released the microphone"
             );
-            if auto_stop {
-                active.auto_stop.arm();
-            }
+            let stops_at = auto_stop.then(|| active.auto_stop.arm());
             let _ = events.send(ControllerEvent::CallEnded {
                 app: active.app_label.clone(),
-                auto_stop,
+                application: call_ended_icon_application(active.application.as_deref()),
+                stops_at,
             });
         }
         if active.auto_stop.due() {
@@ -1022,10 +1095,11 @@ fn poll_recording(
                             candidate,
                         );
                     }
-                    active.call_stop.arm();
+                    let stops_at = active.call_stop.arm();
                     let _ = events.send(ControllerEvent::CallEnded {
                         app: active.app_label.clone(),
-                        auto_stop: true,
+                        application: call_ended_icon_application(active.application.as_deref()),
+                        stops_at: Some(stops_at),
                     });
                 }
                 // The page names the recorded call again (or one the user
@@ -1054,6 +1128,14 @@ fn poll_recording(
     let stop_on_end = crate::app_settings::meeting_stop_when_call_ends();
     disarm_call_stop_unless_watching(recording, stop_on_end, detector, events);
     Ok(())
+}
+
+/// The native call app's ID for the call-ended capsule's icon; browsers
+/// return `None` so web calls show their service mark instead of the browser's.
+fn call_ended_icon_application(application: Option<&str>) -> Option<String> {
+    application
+        .filter(|id| !crate::microphone_activity::is_browser_id(Some(id)))
+        .map(str::to_owned)
 }
 
 /// Drops an armed stop whose call came back or whose setting went off (both share one notice).
@@ -1124,10 +1206,6 @@ struct TabProbe {
     /// The browser this watch began for, and when: its first 30 s ask every
     /// second, then every 30 s.
     burst: Option<(String, Instant)>,
-    /// A recording watches this page (Stop when the call ends): ask
-    /// every [`TAB_QUERY_WATCH`], however long the browser has held the
-    /// microphone.
-    watching: bool,
     latest: Option<(String, ContextSnapshot, Instant)>,
 }
 
@@ -1139,13 +1217,14 @@ impl TabProbe {
             generation: 0,
             started: None,
             burst: None,
-            watching: false,
             latest: None,
         }
     }
 
-    /// The browser's newest answered page, or nothing yet.
-    fn page(&mut self, bundle_id: &str, now: Instant) -> ContextSnapshot {
+    /// The browser's newest answered page, or nothing yet. When `watching` is
+    /// true (a recording watches its page for another call under Stop when the
+    /// call ends), queries run every [`TAB_QUERY_WATCH`] instead of backing off.
+    fn page(&mut self, bundle_id: &str, now: Instant, watching: bool) -> ContextSnapshot {
         let received = self
             .running
             .as_ref()
@@ -1162,7 +1241,7 @@ impl TabProbe {
             Some((_, Err(mpsc::TryRecvError::Disconnected))) => self.running = None,
             Some((_, Err(mpsc::TryRecvError::Empty))) | None => {}
         }
-        let interval = self.interval(bundle_id, now);
+        let interval = self.interval(bundle_id, now, watching);
         if self.running.is_none()
             && self
                 .started
@@ -1215,8 +1294,8 @@ impl TabProbe {
     /// How far apart this browser's tab queries are: every two seconds while
     /// a recording watches its page for another call, else one second through
     /// the first 30 s it holds the microphone, then every 30 s.
-    fn interval(&mut self, bundle_id: &str, now: Instant) -> Duration {
-        if self.watching {
+    fn interval(&mut self, bundle_id: &str, now: Instant, watching: bool) -> Duration {
+        if watching {
             return TAB_QUERY_WATCH;
         }
         let bursting = match &self.burst {
@@ -1278,7 +1357,7 @@ impl BrowserWatch {
             return ContextSnapshot::default();
         }
         let now = Instant::now();
-        let page = self.probe.page(bundle_id, now);
+        let page = self.probe.page(bundle_id, now, false);
         self.memory.recall(application, page, now)
     }
 
@@ -1294,10 +1373,7 @@ impl BrowserWatch {
         let Some(bundle_id) = application.canonical_bundle_id() else {
             return ContextSnapshot::default();
         };
-        self.probe.watching = true;
-        let page = self.probe.page(bundle_id, Instant::now());
-        self.probe.watching = false;
-        page
+        self.probe.page(bundle_id, Instant::now(), true)
     }
 }
 
@@ -1523,6 +1599,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
+            playback_locked_noted: false,
             worker: thread::spawn(|| Err(eyre!("not recording"))),
         });
         if let Some(active) = recording.as_mut() {
@@ -1563,6 +1640,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
+            playback_locked_noted: false,
             worker: thread::spawn(|| Err(eyre!("not recording"))),
         }
     }
@@ -1965,6 +2043,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
+            playback_locked_noted: false,
             worker: thread::spawn(|| Err(eyre!("not recording"))),
         });
         start_import(
@@ -2037,13 +2116,13 @@ mod tests {
         let mut probe = TabProbe::new(slow);
         let started = Instant::now();
         assert_eq!(
-            probe.page("com.brave.Browser", started),
+            probe.page("com.brave.Browser", started, false),
             ContextSnapshot::default()
         );
         assert!(started.elapsed() < Duration::from_millis(200));
         // The answer is picked up on a later pass.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while probe.page("com.brave.Browser", Instant::now()) == ContextSnapshot::default() {
+        while probe.page("com.brave.Browser", Instant::now(), false) == ContextSnapshot::default() {
             assert!(Instant::now() < deadline, "the tab query never answered");
             thread::sleep(Duration::from_millis(20));
         }
@@ -2093,16 +2172,16 @@ mod tests {
             Ok(banshee_tab())
         }
         let mut probe = TabProbe::new(slow);
-        probe.page("com.brave.Browser", Instant::now());
+        probe.page("com.brave.Browser", Instant::now(), false);
         probe.reset();
         // The first query is still running: no second one starts beside it.
         thread::sleep(Duration::from_millis(100));
-        probe.page("com.brave.Browser", Instant::now());
+        probe.page("com.brave.Browser", Instant::now(), false);
         assert_eq!(QUERIES.load(Ordering::SeqCst), 1);
         // Once it finishes, its answer belongs to the earlier call.
         thread::sleep(Duration::from_millis(500));
         assert_eq!(
-            probe.page("com.brave.Browser", Instant::now()),
+            probe.page("com.brave.Browser", Instant::now(), false),
             ContextSnapshot::default()
         );
         assert!(probe.latest.is_none());
@@ -2115,12 +2194,12 @@ mod tests {
         }
         let mut probe = TabProbe::new(quick);
         let started = Instant::now();
-        probe.page("com.brave.Browser", started);
+        probe.page("com.brave.Browser", started, false);
         thread::sleep(Duration::from_millis(300));
         // Polled well after the query finished: the answer is already old.
         let polled = started + TAB_QUERY_MAX_AGE + Duration::from_secs(1);
         assert_eq!(
-            probe.page("com.brave.Browser", polled),
+            probe.page("com.brave.Browser", polled, false),
             ContextSnapshot::default()
         );
     }
@@ -2140,7 +2219,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while QUERIES.load(Ordering::SeqCst) < expected || probe.running.is_some() {
                 assert!(Instant::now() < deadline, "the tab query never finished");
-                probe.page("com.brave.Browser", at);
+                probe.page("com.brave.Browser", at, false);
                 thread::sleep(Duration::from_millis(2));
             }
             assert_eq!(QUERIES.load(Ordering::SeqCst), expected);
@@ -2149,34 +2228,38 @@ mod tests {
         let started = Instant::now();
         // The first 30 s ask every second; `started` records the query
         // synchronously, so a backed-off call is proven by it not moving.
-        probe.page("com.brave.Browser", started);
+        probe.page("com.brave.Browser", started, false);
         assert_eq!(probe.started, Some(started));
         settle(&mut probe, started, 1);
         let at_1 = started + Duration::from_secs(1);
-        probe.page("com.brave.Browser", at_1);
+        probe.page("com.brave.Browser", at_1, false);
         assert_eq!(probe.started, Some(at_1));
         settle(&mut probe, at_1, 2);
 
         // From then on they are 30 s apart; an answer waits that long.
         let at_29 = started + Duration::from_secs(29);
-        probe.page("com.brave.Browser", at_29);
+        probe.page("com.brave.Browser", at_29, false);
         assert_eq!(probe.started, Some(at_29));
         settle(&mut probe, at_29, 3);
-        probe.page("com.brave.Browser", started + Duration::from_secs(31));
+        probe.page(
+            "com.brave.Browser",
+            started + Duration::from_secs(31),
+            false,
+        );
         assert_eq!(
             probe.started,
             Some(at_29),
             "a backed-off query started early"
         );
         let at_59 = started + Duration::from_secs(59);
-        probe.page("com.brave.Browser", at_59);
+        probe.page("com.brave.Browser", at_59, false);
         assert_eq!(probe.started, Some(at_59));
         settle(&mut probe, at_59, 4);
 
         // A reset starts a fresh burst at once.
         probe.reset();
         let at_61 = started + Duration::from_secs(61);
-        probe.page("com.brave.Browser", at_61);
+        probe.page("com.brave.Browser", at_61, false);
         assert_eq!(probe.started, Some(at_61));
         settle(&mut probe, at_61, 5);
     }
@@ -2190,28 +2273,38 @@ mod tests {
         let started = Instant::now();
         // A recording watches its page: two seconds, however long the browser
         // has held the microphone.
-        probe.watching = true;
         assert_eq!(
-            probe.interval("com.brave.Browser", started),
+            probe.interval("com.brave.Browser", started, true),
             TAB_QUERY_WATCH
         );
         assert_eq!(
-            probe.interval("com.brave.Browser", started + Duration::from_secs(31)),
+            probe.interval("com.brave.Browser", started + Duration::from_secs(31), true),
             TAB_QUERY_WATCH
         );
         assert_eq!(
-            probe.interval("com.brave.Browser", started + Duration::from_secs(120)),
+            probe.interval(
+                "com.brave.Browser",
+                started + Duration::from_secs(120),
+                true
+            ),
             TAB_QUERY_WATCH
         );
         // Once nothing watches, detection resumes with a fresh burst, then
         // backs off as before.
-        probe.watching = false;
         assert_eq!(
-            probe.interval("com.brave.Browser", started + Duration::from_secs(120)),
+            probe.interval(
+                "com.brave.Browser",
+                started + Duration::from_secs(120),
+                false
+            ),
             TAB_QUERY_INTERVAL
         );
         assert_eq!(
-            probe.interval("com.brave.Browser", started + Duration::from_secs(150)),
+            probe.interval(
+                "com.brave.Browser",
+                started + Duration::from_secs(150),
+                false
+            ),
             TAB_QUERY_BACKOFF
         );
     }

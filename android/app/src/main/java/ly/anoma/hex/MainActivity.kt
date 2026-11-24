@@ -80,10 +80,12 @@ internal data class Setup(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        /** Deep-link extra for opening Hex directly on Keyboard or Bubble settings. */
+        /** Deep-link extra for opening Hex directly on Keyboard, Bubble, or Diagnostics settings. */
         const val EXTRA_PAGE = "ly.anoma.hex.extra.page"
         const val PAGE_KEYBOARD = "keyboard"
         const val PAGE_BUBBLE = "bubble"
+        /** The keyboard's "Speed test done" line opens Labs › Diagnostics. */
+        const val PAGE_DIAGNOSTICS = "diagnostics"
     }
     private val prefs by lazy { getSharedPreferences("setup", MODE_PRIVATE) }
     private val imm by lazy { getSystemService(InputMethodManager::class.java) }
@@ -112,7 +114,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         capture = MicCapture(LocalSpeech(applicationContext),
-            update = { next, reason -> phase = next; notice = speechNote(reason) },
+            // Home's Dictate bar too: onStop cancels, so the screen mustn't sleep mid-dictation.
+            update = { next, reason -> phase = next; notice = speechNote(reason); window.keepAwake(next) },
             meter = {}, insert = { text, _ -> transcript = text }, appContext = applicationContext)
         askedAccessibility = savedInstanceState?.getBoolean("asked_accessibility", false) ?: false
         page = prefs.getInt("page", 0).coerceIn(0, 3)

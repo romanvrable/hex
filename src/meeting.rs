@@ -77,7 +77,7 @@ mod turn;
 mod warning;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod watcher;
-pub use capture::track_levels;
+pub use capture::{microphone_muted, track_levels};
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub use chapters::chapters_file;
 #[cfg(target_os = "macos")]
@@ -189,6 +189,9 @@ pub enum MeetingRequest {
         id: String,
         entries: Vec<TranscriptEntryKey>,
     },
+    /// Leave Hex's microphone out of the recording under way, or put it back
+    /// (macOS; Labs › Mute the microphone while recording).
+    SetMicrophoneMuted(bool),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -575,6 +578,8 @@ pub fn record(
             sender: sender.clone(),
             drops: drops.clone(),
             clock: capture_clock,
+            // The system supervisor fills this in with its own watch.
+            system_silence: None,
         };
         // Each source recovers on its own: losing system audio (for example
         // when ScreenCaptureKit loses its display) never stops the microphone.

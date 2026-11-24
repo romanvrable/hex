@@ -65,6 +65,10 @@ struct MacOutputAdapter<'a, F> {
 }
 
 impl<F: FnMut(&str, PasteMode) -> Result<String>> OutputAdapter for MacOutputAdapter<'_, F> {
+    fn clipboard_text(&mut self) -> Option<String> {
+        crate::dictation::clipboard_phrase::system_text()
+    }
+
     fn insert(&mut self, text: &str, plan: InsertPlan) -> Result<InsertResult, String> {
         let (mode, send) = match plan {
             InsertPlan::CopyOnly => (PasteMode::CopyOnly, false),
@@ -80,7 +84,6 @@ impl<F: FnMut(&str, PasteMode) -> Result<String>> OutputAdapter for MacOutputAda
                 send: false,
                 standalone: false,
             } => (PasteMode::Continue, false),
-            InsertPlan::None => return Ok(InsertResult::default()),
         };
         // Labs › Return to app: the app the capture started in comes back
         // first. When it can't, nothing is pasted; the shared delivery policy

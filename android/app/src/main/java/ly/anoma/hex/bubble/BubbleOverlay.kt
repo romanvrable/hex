@@ -16,6 +16,8 @@ import android.view.WindowManager
 import android.view.animation.OvershootInterpolator
 import android.widget.TextView
 import ly.anoma.hex.R
+import ly.anoma.hex.keyboard.Tap
+import ly.anoma.hex.keyboard.tap
 import ly.anoma.hex.speech.SpeechPhase
 import ly.anoma.hex.useInter
 import kotlin.math.hypot
@@ -111,6 +113,7 @@ internal class BubbleOverlay(
 
     fun render(nextPhase: SpeechPhase, note: String?, isError: Boolean) {
         phase = nextPhase
+        scope.keepScreenOn = nextPhase != SpeechPhase.Idle
         scope.updateState(nextPhase, isError = isError)
         if (scope.shape == BubbleShape.Pill) {
             val target = when (nextPhase) {
@@ -258,7 +261,11 @@ internal class BubbleOverlay(
     }
 
     private fun haptic(kind: Int) {
-        if (prefs.haptics) scope.performHapticFeedback(kind)
+        val which = when (kind) {
+            HapticFeedbackConstants.CONFIRM -> Tap.Start
+            else -> Tap.End
+        }
+        tap(service, prefs.haptics, which)
     }
 
     private fun dp(n: Int) = (service.resources.displayMetrics.density * n).roundToInt()

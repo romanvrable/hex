@@ -40,6 +40,10 @@ internal class TypingPreferences(context: Context) {
     var numberRow: Boolean
         get() = prefs.getBoolean(NUMBER_ROW, false)
         set(value) { prefs.edit().putBoolean(NUMBER_ROW, value).apply() }
+    /** Labs › Keyboard › Local currency: the phone's own currency on the 123 page instead of $. Off by default. */
+    var localCurrency: Boolean
+        get() = prefs.getBoolean(LOCAL_CURRENCY, false)
+        set(value) { prefs.edit().putBoolean(LOCAL_CURRENCY, value).apply() }
     /** Labs › Keyboard › Emoji suggestions: the word being typed's emoji in the strip, off by default. */
     var emojiSuggestions: Boolean
         get() = prefs.getBoolean(EMOJI_SUGGESTIONS, false)
@@ -48,10 +52,28 @@ internal class TypingPreferences(context: Context) {
     var keyboardTools: Boolean
         get() = prefs.getBoolean(KEYBOARD_TOOLS, false)
         set(value) { prefs.edit().putBoolean(KEYBOARD_TOOLS, value).apply() }
+    /** Labs › Keyboard › Smart quotes: typographic ’ ‘ “ ” for the quote keys, suggestions and
+     * dictation, off by default. */
+    var smartQuotes: Boolean
+        get() = prefs.getBoolean(SMART_QUOTES, false)
+        set(value) { prefs.edit().putBoolean(SMART_QUOTES, value).apply() }
+    /** Labs › Keyboard › Password manager suggestions: Android's inline autofill suggestions in the
+     * strip, off by default. Hex shows the service's own chips and never reads them. */
+    var passwordManagerSuggestions: Boolean
+        get() = prefs.getBoolean(PASSWORD_MANAGER_SUGGESTIONS, false)
+        set(value) { prefs.edit().putBoolean(PASSWORD_MANAGER_SUGGESTIONS, value).apply() }
+    /** Labs › Keyboard › Voice-only mode: a "voice" subtype other keyboards switch to for dictation
+     * alone, off by default. */
+    var voiceOnly: Boolean
+        get() = prefs.getBoolean(VOICE_ONLY, false)
+        set(value) { prefs.edit().putBoolean(VOICE_ONLY, value).apply() }
 
     // Remember only explicit rejection of this exact pair in this language; never save typed text.
     private fun pair(language: String, original: String, replacement: String): String {
-        val bytes = (language + "\u0000" + original.lowercase() + "\u0000" + replacement.lowercase()).toByteArray()
+        // A smart apostrophe counts as the straight one it replaces, so rejecting a fix twice still
+        // blocks it when the keyboard inserts the fix's curly spelling.
+        val bytes = (language + "\u0000" + original.lowercase().replace('\u2019', '\'') + "\u0000" +
+            replacement.lowercase().replace('\u2019', '\'')).toByteArray()
         return android.util.Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes), android.util.Base64.NO_WRAP)
     }
     fun blocked(language: String, original: String, replacement: String) =
@@ -63,7 +85,11 @@ internal class TypingPreferences(context: Context) {
     companion object {
         const val SUGGEST_SWEAR_WORDS = "suggestSwearWords"
         const val NUMBER_ROW = "numberRow"
+        const val LOCAL_CURRENCY = "localCurrency"
         const val EMOJI_SUGGESTIONS = "emojiSuggestions"
         const val KEYBOARD_TOOLS = "keyboardTools"
+        const val SMART_QUOTES = "smartQuotes"
+        const val PASSWORD_MANAGER_SUGGESTIONS = "passwordManagerSuggestions"
+        const val VOICE_ONLY = "voiceOnly"
     }
 }

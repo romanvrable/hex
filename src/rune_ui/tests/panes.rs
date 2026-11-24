@@ -1298,6 +1298,14 @@ fn the_explainer_picker_and_shortcut_recording_never_share_the_window() {
         rt.state.is_modal(Modal::Picker),
         "the picker replaces the explainer"
     );
+    picker::close(&mut rt.state);
+    tap(&mut rt, "dictation-hotkey");
+    assert!(matches!(
+        rt.state.capture,
+        settings::Capture::Listening { .. }
+    ));
+    picker::open(&mut rt.state);
+    assert!(matches!(rt.state.capture, settings::Capture::Idle));
     explainer::open(&mut rt.state);
     assert!(
         rt.state.is_modal(Modal::Explainer),
@@ -1655,7 +1663,7 @@ fn recording_starts_and_stops_from_the_header() {
     assert!(rt.find("stop-meeting").is_none(), "finalizing");
 
     let mut rt = runtime("meetings-empty", true, PANE_SIZE);
-    assert!(texts(&rt).iter().any(|text| text == "No meetings yet."));
+    assert!(texts(&rt).iter().any(|text| text == "No meetings yet"));
     tap(&mut rt, "start-meeting");
     assert_eq!(
         asked(&rt),
@@ -2738,6 +2746,63 @@ fn stop_phrase_shows_its_phrase_on_its_card_while_on() {
     tap(&mut rt, "lab-stop-phrase");
     assert!(!rt.state.settings.labs.stop_phrase);
     assert!(rt.find("stop-phrase-text").is_none());
+}
+
+#[test]
+fn clipboard_phrase_shows_its_phrase_on_its_card_while_on() {
+    use crate::labs::Feature;
+    let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
+    rt.update(|ui, _| ui.lab_store.group = Some(Feature::ClipboardPhrase.group()));
+    settle(&mut rt);
+    assert!(
+        rt.find("clipboard-phrase-text").is_none(),
+        "hidden while off"
+    );
+    tap(&mut rt, "lab-clipboard-phrase");
+    assert!(rt.state.settings.labs.clipboard_phrase);
+    assert!(rt.find("clipboard-phrase-text").is_some());
+    assert_eq!(
+        rt.state.lab_store.clipboard_phrase.text,
+        crate::dictation::clipboard_phrase::DEFAULT_PHRASE,
+        "the field starts at the saved phrase"
+    );
+
+    // A draft that fails validation stays in the field, says why, and leaves
+    // the saved phrase working.
+    rt.update(|ui, _| {
+        ui.lab_store.clipboard_phrase = rune::TextEdit::new("clipboard".to_string());
+    });
+    rt.state.flush_drafts();
+    assert_eq!(
+        rt.state.settings.labs.clipboard_phrase_text,
+        crate::dictation::clipboard_phrase::DEFAULT_PHRASE
+    );
+    refresh(&mut rt);
+    assert!(rt.find("clipboard-phrase-text-error").is_some());
+
+    // A valid draft saves.
+    rt.update(|ui, _| {
+        ui.lab_store.clipboard_phrase = rune::TextEdit::new("what I copied".to_string());
+    });
+    rt.state.flush_drafts();
+    assert_eq!(
+        rt.state.settings.labs.clipboard_phrase_text,
+        "what I copied"
+    );
+    refresh(&mut rt);
+    assert!(rt.find("clipboard-phrase-text-error").is_none());
+
+    // A phrase saved elsewhere updates the field.
+    let mut external = rt.state.settings.clone();
+    external.labs.clipboard_phrase_text = "the clipboard".to_string();
+    assert!(rt.state.adopt(external));
+    refresh(&mut rt);
+    assert_eq!(rt.state.lab_store.clipboard_phrase.text, "the clipboard");
+
+    // The field leaves with its lab.
+    tap(&mut rt, "lab-clipboard-phrase");
+    assert!(!rt.state.settings.labs.clipboard_phrase);
+    assert!(rt.find("clipboard-phrase-text").is_none());
 }
 
 #[test]

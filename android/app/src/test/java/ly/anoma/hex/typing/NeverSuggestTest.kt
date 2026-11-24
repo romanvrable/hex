@@ -282,6 +282,56 @@ class NeverSuggestTest {
         assertEquals("es ill ", word("es", spatial = false).typed(layout("es"), "es ill "))
     }
 
+    // A mark from the ?123 page ends the word typed on the letters as the letters page's own marks do: the
+    // engine keeps the word across the switch and asks the same TypingWord.endsWord (iPhone Hex's wordEnders, plus
+    // the smart ”), so "teh" then ?123 "?" is "the?" (Gboard too). A digit or a mark that carries the token on (an
+    // apostrophe, @, _, -, / or #) never ends it, so it corrects nothing on either page.
+    @Test fun aClosingMarkFromTheSymbolPageCorrectsAsOnTheLetters() {
+        val g = layout("en")
+        for (mark in ",.!?;:)\"\u201D") {
+            val w = word(spatial = false)
+            w.reset("")
+            for (c in "teh") w.tap(g, c)
+            assertTrue("$mark ends a word", TypingWord.endsWord(mark))
+            assertEquals("teh$mark", "the", w.finish(mark)?.replacement)
+        }
+        for (mark in "0123456789'\u2019@_-/#") assertFalse("$mark carries the token on", TypingWord.endsWord(mark))
+    }
+
+    // Labs › Keyboard › Smart quotes: a word autocorrected to a curly apostrophe is still revised by
+    // the word after it, because revision looks the word up by its straight spelling.
+    @Test fun aCurledContractionIsStillRevisedByTheNextWord() {
+        val g = layout("en")
+        val w = word(spatial = false)
+        val curly: (String) -> String = { it.replace('\'', '\u2019') }
+        w.reset("")
+        for (c in "youre") w.tap(g, c)
+        val first = w.finish(' ', KeyPoint(183.93, 234.5), g, curly)
+        assertEquals("you’re", first?.replacement)
+        w.reset("you’re ")
+        for (c in "mother") w.tap(g, c)
+        val second = w.finish(' ', KeyPoint(183.93, 234.5), g, curly)
+        assertEquals("you’re mother", second?.original)
+        assertEquals("your mother", second?.replacement)
+    }
+
+    // The same rule as the straight-apostrophe test ("you're mother " stays): a correction that
+    // changes letters and carries an apostrophe ("your" -> "you're") is never revised by the word
+    // after it, with the apostrophe straight or smart.
+    @Test fun aCurledCountChangingFixIsNotRevised() {
+        val g = layout("en")
+        val w = word(spatial = false)
+        personal(w, emptyList(), mapOf("your" to "you're"))
+        val curly: (String) -> String = { it.replace('\'', '\u2019') }
+        w.reset("")
+        for (c in "your") w.tap(g, c)
+        val first = w.finish(' ', KeyPoint(183.93, 234.5), g, curly)
+        assertEquals("you’re", first?.replacement)
+        w.reset("you’re ")
+        for (c in "mother") w.tap(g, c)
+        assertNull(w.finish(' ', KeyPoint(183.93, 234.5), g, curly))
+    }
+
     // iOS testASpaceTappedAtTheSpaceBarsEdgeForALetterJoinsTheWords: a space tapped at the bar's top
     // edge, under a letter the word needed, joins the words at the next word's space.
     @Test fun aSpaceTappedAtTheBarsEdgeForALetterJoinsTheWords() {

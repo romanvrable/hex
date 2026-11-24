@@ -164,9 +164,12 @@ Requires the selected local dictation model, Microphone, and System Audio
 Recording (the "System Audio Recording Only" list under Privacy & Security ›
 Screen & System Audio Recording; `NSAudioCaptureUsageDescription`). Screen
 Recording alone still works through the ScreenCaptureKit fallback. The opt-in is `meetings.enabled` in `settings.json`, alongside
-`meetings.show_recording_indicator` (default `true`) and
-`meetings.recording_indicator_corner` (default `top_right`)
-([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
+`meetings.show_recording_indicator` (default `true`),
+`meetings.recording_indicator_corner` (default `top_right`), and
+`meetings.recording_indicator_display` (only chosen while Labs › Indicator on
+any display is on; left out of the file while the indicator rests on the
+primary display) ([app_settings.rs](../../src/app_settings.rs)
+`MeetingSettings`). Recording
 refuses to start without either grant and asks macOS for System Audio Recording.
 
 ## Linux and Windows
@@ -386,6 +389,10 @@ that has been tried by hand on a real Windows PC or X11 desktop; only a native
 Wayland capsule returns to the corner it started in
 (`primary_screen_size` in
 [rune_ui/meeting_capsules/screen.rs](../../src/rune_ui/meeting_capsules/screen.rs)).
+Every capsule otherwise stays on the primary display, on every OS; Labs ›
+Indicator on any display is the opt-in that lets a release land on the display
+under the pointer (macOS and Windows, `labs.meeting_indicator_display`; see
+[the floating indicator](#record)).
 Verified: Linux and Windows x64 build and lint
 (`cargo clippy`, `cargo xwin clippy`); the single default-output PipeWire
 monitor capture and the pw-dump parsing were checked by hand on Arch/niri
@@ -1018,7 +1025,17 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
   -> Menu bar: record symbol + elapsed time
      ├── "Recording · <title> · 12:34" -> Meetings pane
      │   └── title follows the provisional title (see Titles And Summary)
-     └── Stop & Transcribe
+     ├── Stop & Transcribe
+     │   └── asked -> the tray, the menu bar, and `hex status` read
+     │      "stopping" until capture ends and "transcribing" takes over
+     │      (a stop asked while it is still starting reads so too);
+     │      the tray's Record and the menu bar's Record Meeting stay
+     │      disabled, and `hex meetings record` answers busy (exit 1), never
+     │      "Already recording": the recorder finishes this meeting before
+     │      it takes another (checks: meeting::runtime::tests,
+     │      control::meetings::tests)
+     └── Mute Microphone / Unmute Microphone (Labs › Mute the microphone
+         while recording; see Mute Microphone (Labs))
      (Idle menu bar: "Record Meeting"; "Copy Last Meeting Transcript" sits
       under Paste Last Dictation; there is no Meetings… item, Settings… opens
       the same window)
@@ -1034,7 +1051,9 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      ├── Windows: Rune waits for a swap-chain slot before each frame (Rune
      │   #985), so the pill's and panel's frames in flight stay bounded
      │   through a long recording (#1833; not measured on Windows)
-     ├── In the saved recording_indicator_corner
+     ├── In the saved recording_indicator_corner, on the primary display, or
+     │   on the display it was dragged to with Labs › Indicator on any
+     │   display (macOS and Windows; `screen::target` pins the window there)
      ├── Follows the setting mid-recording: turning it off hides the pill and
      │   on shows it, keeping the recording's start time, within a second
      │   (the_recording_capsule_follows_the_indicator_setting_mid_recording;
@@ -1055,8 +1074,9 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │   │   the rows' 14 pt inset on both sides: the time's right edge is one
      │   │   line at rest, open and finished (open and finished in a left corner)
      │   │   (`the_header_keeps_the_rows_inset_at_rest_open_and_finished`)
-     │   └── "Microphone is silent" (warning) or, for its first 10 s, "Started
-     │       automatically" shows beside the meter
+     │   └── "Microphone is silent" (warning), "Microphone muted" (Labs ›
+     │       Mute the microphone while recording, in its place), or, for its
+     │       first 10 s, "Started automatically" shows beside the meter
      ├── Hover -> the pill reveals three full-width actions beside the header:
      │   Stop nearest the meter, Copy agent prompt, Copy all; pointer
      │   leaving -> eases back to rest (a held press keeps it open). A bottom
@@ -1163,6 +1183,26 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │   macOS, Windows, Linux X11, and XWayland when GNOME floats it there,
      │   though Windows and X11 have not been tried on a real machine; only a
      │   native Wayland capsule returns to the corner it started in)
+     ├── Labs › Indicator on any display (off by default; macOS and Windows;
+     │   labs.meeting_indicator_display) -> a release lands in the nearest
+     │   corner of the display under the pointer, measured by that display's
+     │   own size, and saves that display with the corner
+     │   (meetings.recording_indicator_display): a capsule dragged onto a
+     │   second display jumps there instead of gliding, and every capsule
+     │   shows on the saved display from then on. A display that is no longer
+     │   connected places the capsule on the primary display and keeps the
+     │   saved name, and a pointer on no display at all keeps the one it was
+     │   dragged on. Off, every show is put back on the primary display
+     │   explicitly (a pinned capsule returns when the lab goes off), and the
+     │   saved display has no effect
+     │   // checks: the tests in meeting_capsules/screen.rs (a release on its
+     │   // own display, a throw onto another, a pointer on no display, a saved
+     │   // display that is gone, which display holds a pointer, a saved id's
+     │   // target, and the lab off putting a capsule back on the primary);
+     │   // the_display_lab_lands_a_release_on_the_pointer_s_display and
+     │   // without_the_display_lab_a_release_keeps_the_primary_display
+     │   // (meeting_capsules.rs); NOT verified on real multi-monitor hardware
+     │   // on either OS (see Labs)
      ├── Copy agent prompt (first, filled) -> a prompt telling a coding agent
      │   to read this meeting with `hex meetings show <id> --md`, catch up with
      │   `--from <mm:ss>` from the last turn copied into it, and search with
@@ -1176,18 +1216,22 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
   -> Settings window may stay closed
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
-  -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
+  -> "Zoom call ended" capsule (rune_ui/meeting_capsules/call_ended.rs):
+     the call app's icon (or rounded-rect provider tile), "Hex is still
+     recording.", Keep recording / Stop & transcribe
      ├── It stands in for the recording pill while it shows
      └── Keep recording (or another capsule replacing it) -> the recording
          pill returns with its start time and title
          (keep_recording_brings_back_the_recording_capsule_as_it_was; not
          observed on a real Mac)
-  -> No timeout; nothing stops automatically
+  -> No timeout without an automatic stop; nothing stops automatically
 
 Panel capsules move like the recording capsule (#1093, graduated from Labs; only a native Wayland capsule still returns to its corner) // meetings.panel-drag
   The panel capsules: offer, reminder, left the call, the finished meeting,
   Recording automatically
-  -> Each opens in the saved recording_indicator_corner (read as it shows)
+  -> Each opens in the saved recording_indicator_corner (read as it shows),
+     on the saved display with Labs › Indicator on any display (or the
+     primary display when that display is gone)
      ├── Drag its body (or the recording pill) -> follows the pointer one to one
      ├── Release -> the corner nearest where the throw would coast to rest
      │   (release velocity over the last 80 ms, capped at 6000 pt/s, coasting
@@ -1197,7 +1241,9 @@ Panel capsules move like the recording capsule (#1093, graduated from Labs; only
      │   recording capsule moves there too. A press mid-glide catches it
      │   where it is. Reduce Motion -> it jumps into the new corner; with no
      │   screen to measure (a native Wayland capsule) -> it returns to the
-     │   corner it started in
+     │   corner it started in. Labs › Indicator on any display: the corner is
+     │   measured on the display under the pointer, and a release over
+     │   another display jumps there, saving that display for the corner
      ├── Press on a button -> the button, as before
      └── Escape mid-drag -> back where it was, nothing saved
   -> The finished meeting opens in the corner its recording ended in
@@ -1226,18 +1272,35 @@ meetings.stop_when_call_ends) // meetings.auto-stop
      processes on macOS, an active render session on any output in
      IAudioSessionManager2 on Windows, and a running Stream/Output/Audio
      node in PipeWire's graph on Linux
+     ├── A browser seems to keep its output open after its call while the
+     │   Mac is locked (#2685), so only a browser's playback stops counting
+     │   then: it counts for nothing while the session is locked or the Mac
+     │   is asleep (audio/system_idle.rs), never for a dimmed display, while
+     │   the microphone still counts. A native call app keeps its playback
+     │   (#835), and a muted browser call that drops the microphone while
+     │   locked ends after the 3 s absence and grace like any other call.
+     │   Each locked browser recording logs "the Mac is locked; the
+     │   browser's playback no longer keeps its call present" once. Check:
+     │   `a_locked_mac_stops_only_a_browser_s_playback_counting`
      └── A failed read counts as playing, so it never stops a recording.
          Windows and macOS skip an individual output, session, or process
          that can't be read. On Linux the graph is briefly empty right after
          its monitor (re)starts, which reads as not playing, harmless because
          the microphone read is empty too and an absence only counts after 3 s
-  -> Both off for about 3 s -> capsule says "Hex stops recording in 30 s
-     unless you keep recording."
+  -> Both off for about 3 s -> "<App> call ended" capsule counts down
+     "Recording stops in 30 s", with a concentric rounded-rect ring around
+     the app icon that drains smoothly on the frame clock and fades over its
+     last 0.18 s (under Reduce Motion it steps once a second with no head;
+     ControllerEvent::CallEnded carries the stop's Instant)
+     ├── CallPresence (meeting/detection.rs) counts the absence from the
+     │   first pass that saw it: a gap between passes (a stalled loop or
+     │   sleep) never restarts its 3 s. Check:
+     │   `a_gap_between_observations_never_restarts_a_call_ended_absence`
      ├── App back on the microphone or output within 30 s -> its stop is
      │   dropped; once no other automatic stop counts the notice is withdrawn
      │   and the recording capsule returns (CallEndedWithdrawn)
      ├── Keep recording -> nothing stops for this absence; leaving again re-arms
-     ├── Stop & transcribe -> stops now
+     ├── Stop now -> Stop & Transcribe now
      └── 30 s pass -> Stop & Transcribe, as the menu bar's; logged
          "meeting recording stopped automatically after its call ended";
          its call's snooze ends as after a hand stop, so the app retaking the
@@ -1336,6 +1399,43 @@ labs.stop_any_call_recording // meetings.auto-stop-any
       `only_an_automatic_browser_call_with_a_code_keeps_reading_its_page`
       (meeting/watcher.rs); not observed on a real Mac, Windows, or Linux
       call, or a real Slack huddle
+```
+
+### Mute Microphone (Labs)
+
+```ts
+Mute microphone (macOS; Labs › Mute the microphone while recording, off by default)
+├── Shown only while a meeting records with the lab on
+│   ├── Meetings pane: a Secondary button beside Stop & transcribe
+│   ├── Menu bar: a row under Stop & Transcribe; the status line adds
+│   │   "Microphone muted" while it is on
+│   └── Recording capsule: "Microphone muted" beside the meter, in place
+│       of the silence warning and the automatic-recording notice
+├── Choosing it sends MeetingRequest::SetMicrophoneMuted to the controller
+│   ├── It acts only while a recording runs and the lab is on; anything
+│   │   else is ignored
+│   └── The switch is cleared when a recording starts, when the finished
+│       worker's recording is taken, and on the controller's next pass
+│       after the lab goes off, so every recording begins with the
+│       microphone in and a lab turned back on does not re-mute
+├── On: the microphone's packets carry exact zeros at the length they
+│   arrived at (PacketSink::send_samples), so microphone.wav keeps the
+│   timeline it shares with system.wav and every position stays put
+│   ├── The microphone source still sees what the device carries, so its
+│   │   digital-silence watch neither warns nor reopens for the mute
+│   └── No "You" line is produced while it is on; the call's audio keeps
+│       recording, transcribing, and timing out as it always does
+├── Unmute microphone puts the microphone back in the same recording
+├── Turning the lab off mid-recording restores audio at once: the sink
+│   reads the lab with each packet, and the controller clears its switch on
+│   its next pass so turning the lab back on does not re-mute. The pane,
+│   menu bar, and capsule read the same gate, so their controls go with it
+└── Checks: `a_muted_microphone_goes_silent_in_place_and_the_call_does_not`,
+    `a_microphone_mute_needs_a_recording_and_its_lab`, and
+    `a_lab_turned_off_clears_the_microphone_mute` (meeting/capture.rs, a
+    synthetic mute; the lab is macOS-only); no Mac call ran with the switch,
+    and the menu-bar, capsule, and pane controls are macOS-only code this
+    Linux build never compiled
 ```
 
 ### Import Audio (Labs)
@@ -1449,8 +1549,13 @@ Capture sources (meeting/capture.rs)                // meetings.capture
 │   │   device UID, ahead of the saved device and the default (#1086)
 │   │   ├── App switches input mid-call -> followed within 1 s, same track
 │   │   ├── App reports no input (muted) -> keeps the one it followed
+│   │   ├── App lists an output-only device (MacBook Pro Speakers) -> never
+│   │   │   followed: only devices with input channels are chosen, so the
+│   │   │   saved device, else System default, stands in; the app's reported
+│   │   │   devices and channels are logged at debug
 │   │   └── Not reported, not listed, Hex Microphone, or won't open -> as below
 │   │      // a_meeting_follows_the_input_its_call_app_records_from,
+│   │      // a_meeting_never_follows_a_device_without_input_channels,
 │   │      // a_meeting_finds_the_input_its_call_uses_by_uid; unverified on a real call
 │   ├── System default changes, the Settings microphone changes, or a missing
 │   │   saved device returns, mid-meeting
@@ -1543,15 +1648,37 @@ Capture sources (meeting/capture.rs)                // meetings.capture
 │          // not verified on a live device or call app
 └── System audio -> Core Audio process tap (global, excluding Hex) on a private
     aggregate device; no display dependency
+    -> the aggregate names no output device, so the tap hears the one that was
+       default when it was created; the source remembers that UID
+       // not verified on a live device: no mid-call output change was
+       // observed with the tap open
+    -> every 2 s it re-reads the default output's UID; a baseline that could
+       not be read adopts the first one that can, rather than never checking
+       -> a different, readable UID -> reopen with the from/to in its error,
+          which rebuilds the tap and its aggregate (a failed read never reopens)
+    -> a system track that carried sound then delivers only exact zeros for
+       15 s -> reopen, logged once by the supervisor with the reason; the
+       reopened stream starts unarmed, so it takes new sound plus another
+       15 s of zeros to fire again
+       // checks: a_system_source_reopens_only_for_a_different_readable_output,
+       // system_silence_never_fires_before_the_track_carried_sound,
+       // system_silence_fires_after_fifteen_seconds_of_exact_zeros,
+       // an_audible_sample_restarts_the_system_zero_count,
+       // a_reopened_system_source_starts_unarmed, and
+       // only_the_system_sink_watches_digital_silence (meeting/capture.rs)
     └── Tap not authorized + Screen Recording granted -> ScreenCaptureKit fallback
 
-A source fails (display sleep ends SCStream, device unplugged, tap stalls 3 s)
+A source fails (display sleep ends SCStream, device unplugged, the default
+output changed, tap stalls 3 s without a buffer, or the system track went
+digitally silent after carrying sound)
   -> Only that source stops; the other keeps recording
   -> Retried every 0.5-5 s until it reopens or the meeting stops
   -> Resumes into the same track; silence fills the gap (>= 1 s) on the
      shared capture clock, recorded in the manifest as track `gaps`
   -> Rolling transcription restarts that source after the gap; the padded WAV
      keeps the final pass on the same timeline
+  -> The digital-silence check runs on every OS through the shared source
+     supervisor, so Linux's and Windows' system tracks get it too
 ``````
 
 Starting a recording no longer opens the Settings window; failures still do.
@@ -1585,6 +1712,7 @@ Other checks: `running_output_streams_say_whether_an_app_still_plays` in
 `a_meeting_manifest_round_trips_a_microphone_warning_and_old_ones_have_none` in
 [meeting/tests.rs](../../src/meeting/tests.rs);
 `a_meeting_follows_the_input_its_call_app_records_from`,
+`a_meeting_never_follows_a_device_without_input_channels`,
 `a_microphone_that_would_not_open_is_tried_a_bounded_number_of_times`, and
 `only_an_input_the_call_app_reports_counts_as_held` in
 [meeting/capture.rs](../../src/meeting/capture.rs); and
@@ -1685,6 +1813,9 @@ While recording                                      // meetings.rolling
      provisional titles (TranscriptReader)
 
 Stop & Transcribe
+  -> The recording reads "stopping" (tray, menu bar, hex status); another
+     recording waits for it: hex meetings record answers busy until the
+     meeting is fully done (idle)
   -> Flush tails -> finish pending chunks           // usually seconds
   -> Any track that fell behind or failed -> stream its WAV in 1 s blocks
   -> Join on one timeline -> Echo suppression -> Final publication
@@ -1994,7 +2125,9 @@ Menu bar (idle) -> Copy Last Meeting Transcript
 
 ```ts
 Header: Start recording (the pane's one Primary button) / red dot, elapsed
-        time, and Stop & transcribe (Secondary), grouped at the right
+        time, Mute microphone or Unmute microphone (Secondary, Labs › Mute the
+        microphone while recording only), and Stop & transcribe (Secondary),
+        grouped at the right
 List (on the title's edge, no divider; grouped Today / Yesterday / date)
 ├── Search meetings (title, app, notes, final transcript) above the rows
 └── Row: title (generated when present), time on the right; meta line
@@ -2585,14 +2718,15 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
 - Microphone and system audio now run on separate device clocks aligned by
   arrival time; drift below the 1 s gap threshold is uncorrected and echo
   thresholds were tuned on ScreenCaptureKit's shared clock.
-- Calendar titles (EventKit) are not implemented.
 - In-call text trails speech by one chunk plus its settling (seconds, see the
   replay numbers); nothing shows a partial sentence before then. A track that
   falls more than 120 s behind skips audio until Stop rebuilds it.
 - The recording capsule's Copy agent prompt / Copy all are unverified on a
   real Mac screen; Copy all can trail the transcript by up to a second.
-- The Meetings pane is verified by Rune goldens rendered offscreen (on Linux
-  and on hailmary's Metal), not on a Mac screen; the capsules have no golden.
+- The Meetings pane and five capsule states (recording rest and open,
+  auto-started, call-ended, and ready) are verified by Rune goldens rendered
+  offscreen on Linux, not on a Mac screen; the offer, finalizing, and
+  calendar-reminder capsules have no golden yet.
 - Echo thresholds are tuned on two speaker-mode calls (2026-10-15 and
   2026-10-16), with six hand-labeled local utterances; other rooms, external
   speakers, and Bluetooth are unmeasured. The 2026-10-16 replay audio was lost

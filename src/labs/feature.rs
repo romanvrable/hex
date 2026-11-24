@@ -229,6 +229,9 @@ define_features! {
     VoiceIsolation => labs(voice_isolation), "voice-isolation", Dictation, Everyone, MACOS, 20261122;
     DictateWhileAnnotating => labs(dictate_while_annotating), "dictate-while-annotating", Annotate, Everyone, EVERY, 20261122;
     StopAnyCallRecording => labs(stop_any_call_recording), "stop-any-call-recording", Meetings, Everyone, EVERY, 20261123;
+    ClipboardPhrase => labs(clipboard_phrase), "clipboard-phrase", Output, Everyone, EVERY, 20261124, extra: ["labs.clipboard_phrase_text"];
+    MeetingMicrophoneMute => labs(meeting_microphone_mute), "meeting-microphone-mute", Meetings, Everyone, MACOS, 20261124;
+    MeetingIndicatorDisplay => labs(meeting_indicator_display), "meeting-indicator-display", Meetings, Everyone, MACOS_WINDOWS, 20261124;
 }
 
 impl Feature {
@@ -314,6 +317,13 @@ impl Feature {
 
     pub fn set(self, settings: &mut AppSettings, on: bool) {
         self.set_field(settings, on);
+        self.apply_side_effects(settings);
+    }
+
+    /// Runs any setting normalization or shortcut repair implied by this
+    /// feature's current value in `settings`. Shared by [`Self::set`] and
+    /// `hex settings set`.
+    pub(crate) fn apply_side_effects(self, settings: &mut AppSettings) {
         match self {
             Self::DoubleTapModifiers => {
                 // Off, a modifier-only shortcut can't be double-tap-only, so
@@ -323,7 +333,7 @@ impl Feature {
             Self::Screenshots =>
             {
                 #[cfg(hex_capture)]
-                if on {
+                if self.on(settings) {
                     settings.clear_record_shortcut_sharing_capture();
                 }
             }

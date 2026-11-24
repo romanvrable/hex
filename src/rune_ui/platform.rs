@@ -251,6 +251,8 @@ pub(super) struct ScrawlView {
     pub(super) folder_error: Option<String>,
     /// Turning captures on or off failed (the pane sets it).
     pub(super) enable_error: Option<String>,
+    /// How it works is open (the pane sets it).
+    pub(super) how_it_works: bool,
 }
 
 #[cfg(hex_capture)]
@@ -604,6 +606,9 @@ pub(super) enum MeetingRequest {
         id: String,
         entries: Vec<crate::meeting::TranscriptEntryKey>,
     },
+    /// Leave Hex's microphone out of the recording under way, or put it back
+    /// (macOS; Labs › Mute the microphone while recording).
+    SetMicrophoneMuted(bool),
     Rename {
         id: String,
         title: String,

@@ -697,6 +697,16 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: a saved meeting's transcript offers selecting lines and deleting them, and later summaries, copies, search, and the Markdown file use what's left",
     ),
     key(
+        "labs.meeting_microphone_mute",
+        Kind::Bool,
+        "Labs: while a meeting records, Mute microphone leaves Hex's microphone out of the recording and Unmute microphone puts it back; the call's own audio keeps recording and transcribing (macOS)",
+    ),
+    key(
+        "labs.meeting_indicator_display",
+        Kind::Bool,
+        "Labs: the meeting recording indicator stays on the display it was dragged to, in the corner nearest where it was let go, instead of only the primary display (macOS and Windows)",
+    ),
+    key(
         "labs.output_fixes",
         Kind::Bool,
         "Labs: Output's Try card offers Vocabulary and Fix this, which copies an agent prompt naming the wrong result",
@@ -815,6 +825,19 @@ pub(super) const KEYS: &[Key] = &[
          \"Sent from Hex\" by default, and empty adds nothing",
     ),
     key(
+        "labs.clipboard_phrase",
+        Kind::Bool,
+        "Labs: labs.clipboard_phrase_text spoken in a normal dictation becomes the clipboard's \
+         text in double quotes, before it is pasted, kept in History, and remembered for Paste \
+         Last",
+    ),
+    key(
+        "labs.clipboard_phrase_text",
+        Kind::Text,
+        "Labs: the words replaced with the clipboard, at least two words and six letters; \
+         \"my clipboard\" by default",
+    ),
+    key(
         "labs.dictation_style",
         Kind::Bool,
         "Labs: every normal dictation is written as Polished, Casual, Notes, or Verbatim \
@@ -855,6 +878,11 @@ pub(super) const KEYS: &[Key] = &[
         "meetings.recording_indicator_corner",
         Kind::Choice(&["top_right", "top_left", "bottom_right", "bottom_left"]),
         "Screen corner of the meeting recording indicator",
+    ),
+    optional(
+        "meetings.recording_indicator_display",
+        Kind::Text,
+        "The display the meeting recording indicator rests on, named the way the OS names it; none is the primary display",
     ),
     optional(
         "meetings.retention",
@@ -965,7 +993,7 @@ pub(super) const KEYS: &[Key] = &[
     optional(
         "ui_language",
         Kind::Choice(&[
-            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr", "ru",
+            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr", "ru", "hu",
         ]),
         "Interface language; none follows the system",
     ),
@@ -1082,6 +1110,8 @@ pub(super) const NEEDS: &[(&str, &str)] = &[
     ("meetings.", "meetings"),
     ("labs.live_chapters", "meetings"),
     ("labs.stop_any_call_recording", "meetings"),
+    ("labs.meeting_microphone_mute", "meetings"),
+    ("labs.meeting_indicator_display", "meetings"),
     ("experimental.hex_microphone", "fun"),
     ("typed_text_hotkey", "typed_text"),
     ("show_dock_icon", "dock_icon"),

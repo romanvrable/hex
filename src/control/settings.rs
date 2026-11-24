@@ -334,7 +334,6 @@ pub fn apply(
                 ));
             }
         }
-        "labs.double_tap_modifiers" => candidate.normalize_double_tap_settings(),
         _ if matches!(key.kind, Kind::Shortcut(_)) => {
             let Kind::Shortcut(slot) = key.kind else {
                 unreachable!("shortcut keys have the shortcut kind");
@@ -418,13 +417,6 @@ pub fn apply(
                  shortcut first",
             ));
         }
-        #[cfg(hex_capture)]
-        "labs.screenshots" if candidate.labs.screenshots => {
-            candidate.clear_record_shortcut_sharing_capture();
-        }
-        "labs.standalone_special_keys" => candidate.repair_special_keys(),
-        "labs.section_key_alone" => candidate.repair_section_key(),
-        "labs.microphone_key" => candidate.repair_microphone_key(),
         "labs.parakeet_ultra" if !candidate.labs.parakeet_ultra => {
             if let Some(why) = crate::labs::Feature::ParakeetUltra.off_refusal(settings) {
                 return Err(invalid(name, why));
@@ -433,6 +425,11 @@ pub fn apply(
         "show_dock_icon" => effects.push(Effect::DockIcon),
         "updates.channel" => effects.push(Effect::CheckForUpdates),
         _ => {}
+    }
+    if let Some(feature) = crate::labs::Feature::for_settings_key(key.key)
+        && feature.settings_key() == key.key
+    {
+        feature.apply_side_effects(&mut candidate);
     }
     Ok(Change {
         settings: candidate,
@@ -796,6 +793,7 @@ mod tests {
                 retention: Some(crate::app_settings::MeetingRetention::Day),
                 audio_retention: Some(crate::app_settings::MeetingRetention::Day),
                 opencode_model: Some("anthropic/claude-haiku".into()),
+                recording_indicator_display: Some(r"\\.\DISPLAY2".into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -1027,6 +1025,52 @@ mod tests {
         }
         assert_eq!(
             change.settings.labs.voice_prompt_phrase, "say it better",
+            "a refused draft leaves the saved phrase"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_phrase_needs_two_words_and_six_letters() {
+        let change = apply(
+            &AppSettings::default(),
+            "labs.clipboard_phrase",
+            "on",
+            &rules(),
+        )
+        .unwrap();
+        assert!(change.settings.labs.clipboard_phrase);
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text,
+            crate::dictation::clipboard_phrase::DEFAULT_PHRASE
+        );
+        let change = apply(
+            &change.settings,
+            "labs.clipboard_phrase_text",
+            "  what I copied ",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text, "what I copied",
+            "a saved phrase is trimmed"
+        );
+        for (raw, reason) in [
+            ("clipboard", "two words"),
+            ("a clip", "six letters"),
+            ("", "two words"),
+        ] {
+            let error = apply(
+                &change.settings,
+                "labs.clipboard_phrase_text",
+                raw,
+                &rules(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{raw}");
+            assert!(error.message.contains(reason), "{raw}: {}", error.message);
+        }
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text, "what I copied",
             "a refused draft leaves the saved phrase"
         );
     }
