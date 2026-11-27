@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings › Experiments: unfinished features grouped by domain (Dictation, Languages,
+/// Settings › Labs: unfinished features grouped by domain (Dictation, Languages,
 /// Keyboard layout, Typing), off until turned on. They live in the App Group so the keyboard
 /// reads them too.
 struct ExperimentsSettingsPage: View {
@@ -9,8 +9,6 @@ struct ExperimentsSettingsPage: View {
     @State private var cleanupAvailability = AppleIntelligenceCleanupAvailability.current
     @State private var adaptiveTouchStatus = AdaptiveTouchStatus.sessionOnly
     @State private var confirmingTouchReset = false
-    @State private var multilingualParakeet = MultilingualParakeetSettings().isEnabled
-    private let multilingualParakeetFits = MultilingualParakeetSettings.fits()
 
     private func toggleBinding(_ get: @escaping () -> Bool, _ set: @escaping (Bool) -> Void) -> Binding<Bool> {
         Binding(
@@ -52,7 +50,7 @@ struct ExperimentsSettingsPage: View {
     }
 
     var body: some View {
-        SettingsPageScaffold(title: "Experiments") {
+        SettingsPageScaffold(title: "Labs") {
             dictationSection
             languagesSection
             layoutSection
@@ -61,22 +59,15 @@ struct ExperimentsSettingsPage: View {
             // Testers tell the team how an experiment went (absent without a report key).
             if Feedback.isAvailable {
                 SettingsCard {
-                    FeedbackRow(screen: "Settings › Experiments", dictation: DictationController.shared)
+                    FeedbackRow(screen: "Settings › Labs", dictation: DictationController.shared)
                 }
                 .padding(.top, 8)
             }
         }
         .animation(HexMotion.settleAnimation(reduceMotion: reduceMotion), value: adaptiveTouchOn)
         .animation(HexMotion.settleAnimation(reduceMotion: reduceMotion), value: keyboardThemesOn)
-        .onChange(of: multilingualParakeet) { _, enabled in
-            guard enabled != MultilingualParakeetSettings().isEnabled else { return }
-            MultilingualParakeetSettings().isEnabled = enabled
-            // On: downloads beside the engine that dictates; off: stops and deletes it.
-            DictationController.shared.multilingualParakeetChanged()
-        }
         .onAppear {
             cleanupAvailability = AppleIntelligenceCleanupAvailability.current
-            multilingualParakeet = MultilingualParakeetSettings().isEnabled
             refreshAdaptiveTouchStatus()
             revision += 1
         }
@@ -88,29 +79,8 @@ struct ExperimentsSettingsPage: View {
 
         SettingsCard {
             SettingsToggleRow(
-                title: String(localized: "Multilingual model (Parakeet)"),
-                detail: multilingualParakeetFits
-                    ? String(localized: "25 languages, even mixed in one sentence. \(ParakeetUltraTranscriber.downloadSize) download. Once ready, keyboard dictation opens Hex.")
-                    : String(localized: "Needs an iPhone with 6 GB of memory or more"),
-                isOn: $multilingualParakeet
-            )
-            .disabled(!multilingualParakeetFits)
-
-            if multilingualParakeet {
-                MultilingualModelStatus(
-                    download: DictationController.shared.multilingualDownload,
-                    retry: { DictationController.shared.retryMultilingualParakeet() },
-                    turnOff: { multilingualParakeet = false }
-                )
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-            }
-
-            SettingsDivider()
-
-            SettingsToggleRow(
                 title: String(localized: "Two-language dictation"),
-                detail: String(localized: "Checks a second keyboard language and keeps the better match."),
+                detail: String(localized: "Checks a second keyboard language and keeps the better match"),
                 isOn: toggleBinding(
                     { TwoLanguageDictationSettings().isEnabled },
                     { TwoLanguageDictationSettings().isEnabled = $0 }
@@ -121,7 +91,7 @@ struct ExperimentsSettingsPage: View {
 
             SettingsToggleRow(
                 title: String(localized: "Voice isolation"),
-                detail: String(localized: "Records with Apple's voice chat processing so Control Center's Mic Mode can offer Voice Isolation. Other audio may be lowered while recording, and Bluetooth headphones may switch to the call (hands-free) profile."),
+                detail: String(localized: "Lets Mic Mode in Control Center isolate your voice. Other audio may go quiet, and Bluetooth headphones may drop to call quality while you dictate."),
                 isOn: toggleBinding(
                     { VoiceIsolationSettings().isEnabled },
                     { VoiceIsolationSettings().isEnabled = $0 }
@@ -201,7 +171,7 @@ struct ExperimentsSettingsPage: View {
         SettingsCard {
             SettingsToggleRow(
                 title: String(localized: "Comma and period keys"),
-                detail: String(localized: "Puts comma and period keys beside the space bar on the letters keyboard."),
+                detail: String(localized: "Comma and period beside the space bar"),
                 isOn: keyboardBinding(\.commaPeriodKeys)
             )
 
@@ -209,7 +179,7 @@ struct ExperimentsSettingsPage: View {
 
             SettingsToggleRow(
                 title: String(localized: "Dvorak punctuation keys"),
-                detail: String(localized: "Adds comma, period and semicolon keys to the English Dvorak keyboard."),
+                detail: String(localized: "Adds comma, period and semicolon keys to the English Dvorak keyboard"),
                 isOn: keyboardBinding(\.dvorakPunctuation)
             )
 
@@ -232,7 +202,7 @@ struct ExperimentsSettingsPage: View {
             SettingsDivider()
 
             SettingsToggleRow(
-                title: String(localized: "Keyboard themes"),
+                title: String(localized: "Key colors"),
                 isOn: keyboardBinding(\.keyboardThemesEnabled)
             )
 
@@ -258,7 +228,7 @@ struct ExperimentsSettingsPage: View {
 
                 SettingsToggleRow(
                     title: String(localized: "Join the keyboard when unfolded"),
-                    detail: String(localized: "On the iPhone Duo unfolded, keeps the keys on one keyboard instead of splitting them."),
+                    detail: String(localized: "On the iPhone Duo unfolded, keeps the keys on one keyboard instead of splitting them"),
                     isOn: keyboardBinding(\.joinsKeyboardWhenUnfolded)
                 )
             }
@@ -272,7 +242,7 @@ struct ExperimentsSettingsPage: View {
         SettingsCard {
             SettingsToggleRow(
                 title: String(localized: "Adaptive touch"),
-                detail: String(localized: "Learns where you tap each key."),
+                detail: String(localized: "Learns where you tap each key"),
                 isOn: toggleBinding(
                     { AdaptiveTouchSettings().isEnabled },
                     { enabled in
@@ -339,7 +309,7 @@ struct ExperimentsSettingsPage: View {
 
             SettingsToggleRow(
                 title: String(localized: "Emoji shortcodes"),
-                detail: String(localized: "Type a colon and a name, like :pizza, to pick an emoji."),
+                detail: String(localized: "Type a colon and a name, like :pizza, to pick an emoji"),
                 isOn: keyboardBinding(\.emojiShortcodes)
             )
 
@@ -373,13 +343,13 @@ struct ExperimentsSettingsPage: View {
     }
 }
 
-/// Experiments › Keyboard themes: the theme the full keyboard draws while it's on.
+/// Experiments › Key colors: the colour the full keyboard's keys take while it's on.
 private struct KeyboardThemeRow: View {
     @Binding var theme: KeyboardTheme
 
     var body: some View {
         HStack(spacing: 12) {
-            SettingsRowLabel(title: String(localized: "Theme"))
+            SettingsRowLabel(title: String(localized: "Color"))
             Spacer(minLength: 8)
             Menu {
                 ForEach(KeyboardTheme.allCases, id: \.self) { option in

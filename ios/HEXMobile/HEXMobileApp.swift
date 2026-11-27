@@ -8,6 +8,8 @@ struct HEXMobileApp: App {
     @State private var openedFromKeyboard = Self.initialOpenedFromKeyboard
     @State private var showSetup = SettingsSnapshotFixture.showsSetupSheet
     @State private var openPage: SettingsPage?
+    /// Counts the keyboard's Open Hex taps from the Hex key menu: each one shows Home.
+    @State private var homeRequests = 0
 
     init() {
         FullKeyboardSettings().applyLaunchArguments()
@@ -19,7 +21,9 @@ struct HEXMobileApp: App {
         VoiceIsolationSettings().applyLaunchArguments()
         MultilingualParakeetSettings().applyLaunchArguments()
         KeyboardParakeetSettings().applyLaunchArguments()
+        KeyboardParakeetSettings().forgetUnavailableWithoutReason()
         SettingsSnapshotFixture.applyDefaults()
+        HexInbox.sweep()
     }
 
     private static var initialOpenedFromKeyboard: Bool {
@@ -47,9 +51,14 @@ struct HEXMobileApp: App {
                     dictation: dictation,
                     openedFromKeyboard: $openedFromKeyboard,
                     showSetup: $showSetup,
-                    openPage: $openPage
+                    openPage: $openPage,
+                    homeRequests: homeRequests
                 )
                 .onOpenURL { url in
+                    // What's new waits for an open that no link asked for.
+                    WhatsNew.openedByLink = true
+                    // A Hex words file from AirDrop, Files or Open in Hex: its review sheet.
+                    if HexInbox.open(url) { return }
                     guard let request = KeyboardLaunchRequest(url: url) else { return }
                     if case .setup = request {
                         openedFromKeyboard = false
@@ -57,6 +66,10 @@ struct HEXMobileApp: App {
                     } else if case .translationSettings = request {
                         openedFromKeyboard = false
                         openPage = .dictation
+                    } else if case .home = request {
+                        openedFromKeyboard = false
+                        showSetup = false
+                        homeRequests += 1
                     } else if case .pasteSettings = request {
                         openedFromKeyboard = false
                         openPage = .keyboard
@@ -70,6 +83,8 @@ struct HEXMobileApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
+                        // The next open counts as plain again unless a link comes with it.
+                        WhatsNew.openedByLink = false
                         openedFromKeyboard = false
                         dictation.appMovedToBackground()
                     } else if phase == .active {

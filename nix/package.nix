@@ -123,9 +123,22 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../skills
       # The iOS cleaner's instructions, compared by a test.
       ../ios/HEXMobile/TranscriptCleanup.swift
+      # The iOS cleanup tagger's vocabulary and fixtures: Rust tests run the
+      # desktop cleanup against them.
+      ../ios/HEXKeyboard/CleanupTagger/HexCleanupTaggerVocab.txt
+      ../ios/HEXMobileTests/Fixtures/cleanup-reconstruct.json
+      ../ios/HEXMobileTests/Fixtures/cleanup-tagger-handwritten.json
+      ../ios/HEXMobileTests/Fixtures/cleanup-tokenizer.json
+      # The iOS cleanup model download script: a Rust test checks the desktop
+      # model pin names the same release asset.
+      ../ios/scripts/fetch-cleanup-model.sh
       # The Labs registry's published copy: a Rust test compares it to the registry.
       ../site/src/labs.json
       ../macos/HexMicrophoneDriver/Info.plist
+      # The updater's and driver install's code-signature requirements, read at
+      # compile time by src/updater/macos.rs and src/audio/hex_microphone.rs.
+      ../app/driver-requirement.txt
+      ../app/update-requirement.txt
       # Built in: a 2.3.1 install moves itself into this installer's layout.
       ../.github/release/install-linux.sh
     ];

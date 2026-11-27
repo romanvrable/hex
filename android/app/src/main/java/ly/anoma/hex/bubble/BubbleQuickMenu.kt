@@ -166,7 +166,7 @@ internal class BubbleQuickMenu(
                         service.pasteLastDictation()
                     }
                 }
-                addRow(s(R.string.keyboard_menu_language), more(speechPrefs.language?.label ?: s(R.string.keyboard_menu_automatic))) {
+                addRow(s(R.string.keyboard_menu_language), more(speechPrefs.language?.label ?: automaticLabel())) {
                     screen = Screen.Language
                     renderInto(card, maxHeight)
                 }
@@ -174,7 +174,7 @@ internal class BubbleQuickMenu(
                     screen = Screen.Style
                     renderInto(card, maxHeight)
                 }
-                if (speechPrefs.translation && DictationLanguage.canTranslateToEnglish(speechPrefs.spoken)) {
+                if (speechPrefs.translation && speechPrefs.translatable) {
                     addRow(
                         s(R.string.keyboard_menu_next_dictation),
                         more(s(if (service.nextEnglish != false) R.string.keyboard_paste_english else R.string.keyboard_paste_spoken))
@@ -201,7 +201,7 @@ internal class BubbleQuickMenu(
                 val choices = listOf<DictationLanguage?>(null) + DictationLanguage.entries
                 choices.forEachIndexed { i, lang ->
                     if (i > 0) body.addView(divider())
-                    val label = lang?.label ?: s(R.string.keyboard_menu_automatic)
+                    val label = lang?.label ?: automaticLabel(choices = true)
                     val chosen = if (speechPrefs.language == lang) s(R.string.keyboard_menu_chosen) else ""
                     body.addView(rowView(label, chosen) {
                         speechPrefs.language = lang
@@ -259,6 +259,13 @@ internal class BubbleQuickMenu(
         useInter(weight)
         includeFontPadding = false
         setTextColor(service.getColor(colorRes))
+    }
+
+    private fun automaticLabel(choices: Boolean = false): String {
+        val among = speechPrefs.automaticCandidates
+        if (among.size <= 1) return s(R.string.keyboard_menu_automatic) + " · " + among.first().label
+        val sep = s(R.string.language_list_separator)
+        return s(R.string.keyboard_menu_automatic) + if (choices) " · " + among.joinToString(sep) { it.label } else ""
     }
 
     private fun s(id: Int) = service.getString(id)

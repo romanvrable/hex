@@ -12,10 +12,14 @@ use crate::app_settings::AppSettings;
 use crate::dictation::vocabulary::VocabularyEntry;
 use crate::history::stats::HistoryStats;
 use crate::history::{HistoryEntry, HistoryKind, HistoryRetention, recordings};
+use crate::meeting::Labels;
 use crate::meeting::query::{
     ChapterView, Library, ListQuery, Meeting, OffsetRange, SearchQuery, TextHit, TimeRange,
     TranscriptSource, search_texts,
 };
+
+mod subtitles;
+use subtitles::{SubtitleFormat, render_subtitles};
 
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
@@ -135,6 +139,9 @@ pub enum MeetingsCommand {
     /// Search transcripts and notes with the same stemmed, fuzzy BM25 query as MCP.
     Search {
         query: String,
+        /// Limit the search to one meeting, by id, unique prefix, or latest.
+        #[arg(long)]
+        meeting: Option<String>,
         #[arg(long)]
         since: Option<String>,
         #[arg(long)]
@@ -565,6 +572,9 @@ struct MeetingRow<'a> {
     in_progress: bool,
     transcript_source: &'static str,
     warnings: &'a [String],
+    /// The meeting's named speakers; only meetings with some carry the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speakers: Option<&'a crate::meeting::Speakers>,
 }
 
 fn meeting_row(meeting: &Meeting, now: u64) -> MeetingRow<'_> {
@@ -582,6 +592,7 @@ fn meeting_row(meeting: &Meeting, now: u64) -> MeetingRow<'_> {
             TranscriptSource::Missing => "missing",
         },
         warnings: &meeting.warnings,
+        speakers: Some(&meeting.manifest.speakers).filter(|speakers| !speakers.is_empty()),
     }
 }
 
@@ -672,9 +683,17 @@ fn meeting_list_json(
 
 pub fn meetings(command: &MeetingsCommand) -> Result<()> {
     let root = crate::app_paths::support_dir()?;
-    let library = Library::new(root.join("meetings"));
     let now = crate::desktop::events::now_ms();
-    let mut out = io::stdout().lock();
+    meetings_to(&root, command, now, io::stdout().lock())
+}
+
+fn meetings_to(
+    root: &Path,
+    command: &MeetingsCommand,
+    now: u64,
+    mut out: impl Write,
+) -> Result<()> {
+    let library = Library::new(root.join("meetings"));
     match command {
         MeetingsCommand::List(args) => {
             let query = ListQuery {
@@ -709,12 +728,13 @@ pub fn meetings(command: &MeetingsCommand) -> Result<()> {
             let range = OffsetRange::parse(from.as_deref(), to.as_deref())?;
             let meeting = resolve(&library, id)?;
             if let Some(format) = subtitles {
+                let labels = Labels::by_track(&meeting.manifest.speakers);
                 let text = match chapter {
                     Some(number) => {
                         let view = meeting.chapter(*number, now)?;
-                        render_subtitles(view.entries.iter(), format)
+                        render_subtitles(view.entries.iter(), labels, format)
                     }
-                    None => render_subtitles(meeting.entries_in(range, now)?, format),
+                    None => render_subtitles(meeting.entries_in(range, now)?, labels, format),
                 };
                 write!(out, "{text}")?;
                 return Ok(());
@@ -749,10 +769,15 @@ pub fn meetings(command: &MeetingsCommand) -> Result<()> {
         }
         MeetingsCommand::Search {
             query,
+            meeting,
             since,
             until,
             limit,
         } => {
+            let meeting_id = meeting
+                .as_deref()
+                .map(|id| resolve(&library, id).map(|found| found.id.clone()))
+                .transpose()?;
             write!(
                 out,
                 "{}",
@@ -761,11 +786,11 @@ pub fn meetings(command: &MeetingsCommand) -> Result<()> {
                         query: query.clone(),
                         since: since.clone(),
                         until: until.clone(),
-                        meeting_id: None,
+                        meeting_id,
                         limit: *limit as usize,
                         fuzzy: true,
                         include_in_progress: true,
-                        vocabulary: crate::dictation::vocabulary::read_saved(&root),
+                        vocabulary: crate::dictation::vocabulary::read_saved(root),
                     },
                     now
                 )?
@@ -778,87 +803,6 @@ pub fn meetings(command: &MeetingsCommand) -> Result<()> {
         | MeetingsCommand::CopyLast { .. }
         | MeetingsCommand::Delete { .. } => Err(eyre!("this command needs the running Hex")),
     }
-}
-
-/// A timed subtitle format for `hex meetings show --srt|--vtt`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SubtitleFormat {
-    Srt,
-    Vtt,
-}
-
-impl SubtitleFormat {
-    fn from_flags(srt: bool, vtt: bool) -> Option<Self> {
-        match (srt, vtt) {
-            (true, _) => Some(Self::Srt),
-            (false, true) => Some(Self::Vtt),
-            (false, false) => None,
-        }
-    }
-}
-
-/// One cue per transcript entry (a speaker turn), timed by the entry's
-/// offsets from the meeting's start and labelled You or Them.
-fn render_subtitles<'a>(
-    entries: impl IntoIterator<Item = &'a crate::meeting::TranscriptEntry>,
-    format: SubtitleFormat,
-) -> String {
-    let mut out = String::new();
-    if format == SubtitleFormat::Vtt {
-        out.push_str("WEBVTT\n\n");
-    }
-    let mut number = 0_usize;
-    for entry in entries {
-        let text = cue_text(&entry.text);
-        if text.is_empty() {
-            continue;
-        }
-        number += 1;
-        let start = entry.start_ms;
-        let end = entry.end_ms.max(start);
-        let speaker = entry.source.label();
-        match format {
-            SubtitleFormat::Srt => {
-                out.push_str(&format!(
-                    "{number}\n{} --> {}\n{speaker}: {text}\n\n",
-                    subtitle_time(start, ','),
-                    subtitle_time(end, ',')
-                ));
-            }
-            SubtitleFormat::Vtt => {
-                let text = text
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                out.push_str(&format!(
-                    "{} --> {}\n<v {speaker}>{text}\n\n",
-                    subtitle_time(start, '.'),
-                    subtitle_time(end, '.')
-                ));
-            }
-        }
-    }
-    out
-}
-
-/// The entry's text with blank lines and `-->` removed, so it can't end
-/// or break its cue.
-fn cue_text(text: &str) -> String {
-    text.replace("-->", "->")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// `HH:MM:SS,mmm` (SRT) or `HH:MM:SS.mmm` (VTT); hours grow past 99.
-fn subtitle_time(ms: u64, separator: char) -> String {
-    let hours = ms / 3_600_000;
-    let minutes = ms / 60_000 % 60;
-    let seconds = ms / 1_000 % 60;
-    let millis = ms % 1_000;
-    format!("{hours:02}:{minutes:02}:{seconds:02}{separator}{millis:03}")
 }
 
 fn write_json(out: &mut impl Write, value: &impl Serialize) -> Result<()> {

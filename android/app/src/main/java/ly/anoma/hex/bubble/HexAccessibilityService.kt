@@ -8,8 +8,12 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
@@ -18,6 +22,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import ly.anoma.hex.MainActivity
 import ly.anoma.hex.R
 import ly.anoma.hex.keyboard.speechNote
+import ly.anoma.hex.speech.DictationPlace
 import ly.anoma.hex.speech.LocalSpeech
 import ly.anoma.hex.speech.MicCapture
 import ly.anoma.hex.speech.SpeechModel
@@ -25,8 +30,10 @@ import ly.anoma.hex.speech.SpeechOptions
 import ly.anoma.hex.speech.SpeechPhase
 import ly.anoma.hex.speech.SpeechPreferences
 
-/** Owns the floating Hex bubble (`TYPE_ACCESSIBILITY_OVERLAY`) and inserts local Whisper dictations
- * directly into any app's focused field while keeping the user's keyboard (such as SwiftKey) active. */
+/** Owns the floating Hex bubble (`TYPE_ACCESSIBILITY_OVERLAY`) and inserts local Whisper / Parakeet dictations
+ * directly into any app's focused field while keeping the user's keyboard (such as SwiftKey) active.
+ * Never starts a foreground service in [onServiceConnected], preventing Android 14+ background FGS crashes
+ * that would cause Android to disable the Accessibility toggle overnight. */
 class HexAccessibilityService : AccessibilityService() {
     internal val speechPrefs by lazy { SpeechPreferences(this) }
     internal val bubblePrefs by lazy { BubblePreferences(this) }
@@ -40,6 +47,7 @@ class HexAccessibilityService : AccessibilityService() {
     private val startCueDelayed = Runnable { BubbleSounds.playIfEnabled(this, BubbleSounds.Cue.Start) }
     private var stoppedAtMs = 0L
     private var lastFocusedPackage: CharSequence? = null
+    private var focusRequest: AudioFocusRequest? = null
 
     var lastField: AccessibilityNodeInfo? = null
         private set
@@ -58,20 +66,15 @@ class HexAccessibilityService : AccessibilityService() {
         instance = this
         capture = MicCapture(
             recognizer = LocalSpeech(applicationContext),
+            place = DictationPlace.Keyboard,
             update = ::onCaptureUpdate,
             meter = { overlay?.pushLevel(it) },
-            insert = ::commitBubbleSpeech,
-            appContext = applicationContext,
+            insert = { text, _, options, _ -> commitBubbleSpeech(text, options) },
         )
         val menu = BubbleQuickMenu(this, speechPrefs)
         quickMenu = menu
         overlay = BubbleOverlay(this, bubblePrefs, menu)
         getSharedPreferences("bubble", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(bubblePrefListener)
-        if (bubblePrefs.enabled && bubblePrefs.usesBubble &&
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        ) {
-            BubbleDictationService.start(this)
-        }
         refreshBubble()
     }
 
@@ -108,6 +111,7 @@ class HexAccessibilityService : AccessibilityService() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        @Suppress("DEPRECATION")
         if (level >= TRIM_MEMORY_RUNNING_LOW && level != TRIM_MEMORY_UI_HIDDEN) {
             SpeechModel.releaseSoon()
         }
@@ -116,6 +120,8 @@ class HexAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         main.removeCallbacks(hideLater)
         main.removeCallbacks(startCueDelayed)
+        releaseDuckFocus()
+        BubbleDictationService.stop(this)
         getSharedPreferences("bubble", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(bubblePrefListener)
         if (::capture.isInitialized) capture.close()
         lastField = null
@@ -132,6 +138,12 @@ class HexAccessibilityService : AccessibilityService() {
     internal fun refreshBubble() {
         val current = overlay ?: return
         main.removeCallbacks(hideLater)
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive != false
+        if (!interactive) {
+            BubbleDictationService.stop(this)
+            current.hide()
+            return
+        }
         if (bubbleWanted()) current.show()
         else main.postDelayed(hideLater, HIDE_DELAY_MS)
     }
@@ -141,7 +153,6 @@ class HexAccessibilityService : AccessibilityService() {
         val busy = ::capture.isInitialized && capture.phase != SpeechPhase.Idle
         if (busy || bubblePrefs.visibility == BubbleVisibility.Always) return true
         if (!keyboardOpen()) return false
-        // When Both mode is selected and Hex's own keyboard is currently shown, Hex's own strip key is already visible.
         if (bubblePrefs.inputMode == InputMode.Both && hexImeSelected()) return false
         return true
     }
@@ -165,15 +176,10 @@ class HexAccessibilityService : AccessibilityService() {
             overlay?.showNotice(getString(R.string.keyboard_hint_password))
             return false
         }
-        if (!BubbleDictationService.running && !fromArm) {
-            if (!BubbleDictationService.start(this)) {
-                launchArmActivity(startDictation = true)
-                return false
-            }
-        }
         if (!capture.canStart) return false
-        val opts = speechPrefs.options(nextEnglish, duckAudio = bubblePrefs.duckAudio)
+        val opts = speechPrefs.options(nextEnglish)
         nextEnglish = null
+        acquireDuckFocusIfWanted()
         capture.start(opts)
         main.removeCallbacks(startCueDelayed)
         main.postDelayed(startCueDelayed, 150L)
@@ -184,6 +190,7 @@ class HexAccessibilityService : AccessibilityService() {
         if (!::capture.isInitialized) return
         if (capture.phase == SpeechPhase.Opening || capture.phase == SpeechPhase.Listening) {
             main.removeCallbacks(startCueDelayed)
+            releaseDuckFocus()
             stoppedAtMs = SystemClock.uptimeMillis()
             BubbleSounds.playIfEnabled(this, BubbleSounds.Cue.Stop)
             capture.finish()
@@ -194,6 +201,7 @@ class HexAccessibilityService : AccessibilityService() {
         if (!::capture.isInitialized) return
         val hadPendingCue = main.hasCallbacks(startCueDelayed)
         main.removeCallbacks(startCueDelayed)
+        releaseDuckFocus()
         capture.cancelLatest()
         if (!silent && !hadPendingCue) {
             BubbleSounds.playIfEnabled(this, BubbleSounds.Cue.Cancel)
@@ -214,6 +222,27 @@ class HexAccessibilityService : AccessibilityService() {
         )
     }
 
+    private fun acquireDuckFocusIfWanted() {
+        releaseDuckFocus()
+        if (!bubblePrefs.duckAudio) return
+        val audio = getSystemService(AudioManager::class.java) ?: return
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .build()
+        if (audio.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) focusRequest = req
+    }
+
+    private fun releaseDuckFocus() {
+        val req = focusRequest ?: return
+        focusRequest = null
+        runCatching { getSystemService(AudioManager::class.java)?.abandonAudioFocusRequest(req) }
+    }
+
     private fun launchArmActivity(startDictation: Boolean) {
         runCatching {
             startActivity(
@@ -227,23 +256,23 @@ class HexAccessibilityService : AccessibilityService() {
     }
 
     private fun onCaptureUpdate(phase: SpeechPhase, rawNote: String?) {
+        if (phase != SpeechPhase.Opening && phase != SpeechPhase.Listening) releaseDuckFocus()
         BubbleDictationService.instance?.updatePhase(phase)
-        if (rawNote == "Microphone blocked in background") {
-            launchArmActivity(startDictation = false)
-            overlay?.render(phase, getString(R.string.bubble_note_rearmed), isError = true)
+        val micGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (micGranted && !BubbleDictationService.running &&
+            (rawNote == "Allow the microphone in Hex" || rawNote == "Microphone unavailable. Try again.")
+        ) {
+            main.removeCallbacks(startCueDelayed)
+            launchArmActivity(startDictation = true)
+            overlay?.render(phase, null, isError = false)
             refreshBubble()
             return
         }
-        val localized = localizedNote(rawNote)
+        val localized = speechNote(rawNote)
         val isError = rawNote != null && rawNote != "Stopped at 1 minute" && rawNote != "No speech heard"
         if (isError) BubbleSounds.playIfEnabled(this, BubbleSounds.Cue.Error)
         overlay?.render(phase, localized, isError)
         refreshBubble()
-    }
-
-    private fun localizedNote(note: String?): String? = when (note) {
-        "Microphone blocked in background" -> getString(R.string.bubble_note_rearmed)
-        else -> speechNote(note)
     }
 
     private fun commitBubbleSpeech(text: String, options: SpeechOptions) {

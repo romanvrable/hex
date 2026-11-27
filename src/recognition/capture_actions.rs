@@ -27,6 +27,9 @@ pub(super) fn handle_hotkey_action(
             // Labs › Return to app: this paste goes back to the app in front
             // now, even if another one comes forward while the person talks.
             worker.remember_return_to_app();
+            // Labs › Clean up what I say: the tagger's model downloads if
+            // it is missing, and loads, while the person talks.
+            crate::dictation::cleanup::prepare();
             // Labs › YOLO mode: a shortcut started this capture
             // unless a `hex dictation` command says otherwise below.
             worker.set_started_by_shortcut(true);
@@ -85,6 +88,23 @@ pub(super) fn handle_hotkey_action(
                 events,
                 indicator,
             )
+        }
+        // Labs › Model switch shortcut. It records nothing, and the chord's
+        // modifier press may have started a provisional capture, which is
+        // withdrawn as Paste Last's is. A capture already under way keeps its
+        // model: the shortcut is ignored until it ends.
+        HotkeyAction::ModelSwitch => {
+            if crate::audio::recording_environment::intentional_recording_active() {
+                tracing::info!("the model switch shortcut was ignored while a capture records");
+            } else {
+                context.cancel();
+                feedback::retract_start();
+                dictation.cancel()?;
+                // The runtime owns model preparation, so the press only asks
+                // it for the swap.
+                crate::transcription::other_model::request();
+            }
+            emit_engine_state(events, false, worker, device)
         }
         HotkeyAction::PasteLast => {
             // The paste chord's modifier press started a provisional capture.

@@ -1,5 +1,7 @@
 # Hex
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+
 Hex is local voice dictation for Mac, Windows and Linux. Hold a key, speak, and
 it pastes.
 
@@ -63,7 +65,8 @@ Add a GGUF model of your own with "Add model file…" in the picker; see
 ## Downloads
 
 Stable is the current release. Dev is the newest build of `dev` and updates
-itself from the dev channel.
+itself from the dev channel. The [changelog](https://anoma.ly/hex/changelog)
+says what each release changed.
 
 | Platform | Stable | Dev |
 | --- | --- | --- |

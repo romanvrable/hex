@@ -41,7 +41,7 @@ struct AcknowledgementsView: View {
 
     /// Spatial autocorrect's word lists (`scripts/build-typing-model.py`), the keyboard's
     /// never-suggest list (`OffensiveWords`), and the speech models Hex downloads (Parakeet V2,
-    /// and Parakeet Ultra for Experiments › Multilingual model); keep in step with ios/README.md.
+    /// and Parakeet Ultra for Settings › Dictation › Model: Multilingual); keep in step with ios/README.md.
     static let entries: [Entry] = [
         Entry(
             title: "Google Books Ngram data",
@@ -83,6 +83,18 @@ struct AcknowledgementsView: View {
             """
         ),
         Entry(
+            title: "Leipzig Corpora Collection",
+            body: """
+            English words newer than the books and their spellings ("ChatGPT", "TikTok") come \
+            from the Leipzig Corpora Collection's English news downloads for 2023, 2024 and \
+            2025, Leipzig University and the Saxon Academy of Sciences and Humanities in \
+            Leipzig (D. Goldhahn, T. Eckart and U. Quasthoff, LREC 2012; \
+            wortschatz-leipzig.de/en/download), licensed under Creative Commons Attribution \
+            4.0 (creativecommons.org/licenses/by/4.0). Hex keeps only word counts, how many \
+            sites use each word and its spellings.
+            """
+        ),
+        Entry(
             title: "List of Dirty, Naughty, Obscene, and Otherwise Bad Words",
             body: """
             The keyboard's suggestion filter uses the List of Dirty, Naughty, Obscene, and \
@@ -109,7 +121,7 @@ struct AcknowledgementsView: View {
         Entry(
             title: "Parakeet Ultra",
             body: """
-            Experiments › Multilingual model downloads Parakeet Ultra by Moondream \
+            Settings › Dictation › Model: Multilingual downloads Parakeet Ultra by Moondream \
             (huggingface.co/moondream/parakeet-ultra), a post-training of NVIDIA's Parakeet \
             TDT 0.6B v3 (huggingface.co/nvidia/parakeet-tdt-0.6b-v3), both licensed under \
             Creative Commons Attribution 4.0 International \

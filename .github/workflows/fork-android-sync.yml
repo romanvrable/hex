@@ -263,6 +263,10 @@ jobs:
             --notes-file "$notes_file" \
             --latest
 
+          for issue_num in $(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "[Upstream Sync] in:title" --json number --jq '.[].number'); do
+            gh issue close "$issue_num" --repo "${GITHUB_REPOSITORY}" --comment "Resolved and published in release \`$TAG\`."
+          done
+
       - name: Clean up temporary keystore
         if: always()
         run: rm -rf "$RUNNER_TEMP/hex-keystore"

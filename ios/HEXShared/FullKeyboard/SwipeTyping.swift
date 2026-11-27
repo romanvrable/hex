@@ -3,7 +3,7 @@ import UIKit
 
 /// Settings › Keyboard › Swipe typing: slide from a letter through the letters of a word and lift,
 /// and the word goes in, as with Apple's QuickPath and Gboard's glide typing. English and
-/// Spanish, and with Settings › Experiments › Swipe typing in more languages on every layout
+/// Spanish, and with Settings › Labs › Swipe typing in more languages on every layout
 /// with a typing model (French (France), Polish, and German while its model is chosen); every
 /// other layout keeps a drag as a slide to another key.
 ///
@@ -52,7 +52,10 @@ final class SwipeTyping {
     /// Nats more a rare reading the dictionary knows only with a capital costs, unless it is
     /// one of your own words: the model's lowercase list holds names and abbreviations ("gs",
     /// "ut", "kent") that a loose swipe of a common word could read as, and they would go in
-    /// capitalised mid-sentence. Common ones ("john", "york", "english") cost nothing more.
+    /// capitalised mid-sentence. Common ones ("john", "york", "english") cost nothing more, and
+    /// nor does any in English, whose model holds SCOWL's names at their own counts: there the
+    /// 4 nats let "clause" beat a swiped "Claude" half the time to save 9 of the benchmark's
+    /// 12,515 typical swipes (`android/benchmark/typing/README.md` › Swipe typing).
     var nameCost = 4.0
     /// The model's cost (-ln p) past which such a word counts as rare: about its 2,500th word.
     static let commonNameCost = 10.0
@@ -123,7 +126,7 @@ final class SwipeTyping {
         pending[id] = stroke
         guard let first = stroke.points.first, hypot(point.x - first.x, point.y - first.y) > threshold,
               let touch = engine.touches[id], !touch.committed, engine.activeAccentMenu == nil,
-              engine.allowsSwipes else { return false }
+              touch.flick == nil, engine.allowsSwipes else { return false }
         pending[id] = nil
         syncWords()
         engine.beginSwipe(touchID: id)
@@ -225,7 +228,7 @@ final class SwipeTyping {
     func ranked(_ candidates: [SwipeDecoder.Candidate]) -> [String] {
         let model = decoder.model
         func rareName(_ text: String) -> Bool {
-            guard engine.swipeReadsAsName(text) else { return false }
+            guard model.language != KeyboardLanguage.english.rawValue, engine.swipeReadsAsName(text) else { return false }
             return model.index(of: text).map { model.unigramCost($0) > Self.commonNameCost } ?? true
         }
         return candidates
@@ -285,7 +288,7 @@ final class SwipeTyping {
 
 extension KeyboardLanguage {
     /// Swipe typing's default layouts, English and Spanish. Another language swipes too with a
-    /// typing model when Settings › Experiments › Swipe typing in more languages is on
+    /// typing model when Settings › Labs › Swipe typing in more languages is on
     /// (`FullKeyboardSettings.swipesIn`); elsewhere a drag stays a slide to another key.
     var supportsSwipeTyping: Bool { self == .english || self == .spanish }
 }
@@ -325,7 +328,8 @@ final class SwipeTrailView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     static func color(_ palette: FullKeyboardPalette) -> UIColor {
-        palette.isDark ? UIColor(white: 1, alpha: 0.5) : palette.actionFill.withAlphaComponent(0.42)
+        // The trail is drawn over the keys, so it follows them, not the glass.
+        palette.keysAreDark ? UIColor(white: 1, alpha: 0.5) : palette.actionFill.withAlphaComponent(0.42)
     }
 
     override func layoutSubviews() {

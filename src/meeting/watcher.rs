@@ -22,7 +22,7 @@ use crate::meeting::recovery::PendingFinals;
 use crate::meeting::{self, MeetingCalendar, MeetingRequest, MeetingStart, TrackWarning};
 use crate::microphone_activity::{ActiveMicrophoneApplication, active_microphone_applications};
 
-use call_end::{CallEndStop, CallWatch, stops_when_call_ends};
+use call_end::{CallEndStop, CallWatch, icon_application, stops_when_call_ends};
 use call_switch::{
     disarm_call_stop_unless_watching, watching_call_switch, withdraw_call_switch_stop,
 };
@@ -40,6 +40,9 @@ pub(crate) enum ControllerCommand {
     /// offered again once its app releases and retakes the microphone.
     OfferTimedOut(OfferId),
     Stop,
+    /// Discard from the recording capsule's ✕: stop capture, skip the final
+    /// transcript, and move the recording to the Trash.
+    Discard,
     /// Import a local audio file as a meeting (macOS; Labs › Import audio).
     Import(PathBuf),
     /// Delete selected lines from a saved meeting's transcript
@@ -89,11 +92,14 @@ pub(crate) enum ControllerEvent {
     },
     /// The accepted offer, or None for a start that did not come from one.
     Starting(Option<OfferId>),
-    /// `automatic` when the provider is set to Always record.
+    /// `automatic` when the provider is set to Always record; `app` and
+    /// `application` name the call app and its icon, as [`Self::CallEnded`]'s.
     RecordingStarted {
         id: String,
         title: String,
         automatic: bool,
+        app: String,
+        application: Option<String>,
     },
     Retitled {
         title: String,
@@ -162,6 +168,9 @@ struct ActiveRecording {
     /// call app present, so the absence one is dropped every pass.
     call_stop: AutoStop,
     stop: Arc<AtomicBool>,
+    /// Set with `stop` by Discard: the worker skips its final pass and the
+    /// controller trashes what it recorded.
+    discard: Arc<AtomicBool>,
     updates: Receiver<meeting::RecordingUpdate>,
     reported_started: bool,
     /// A browser's playback stopped counting while the Mac was locked, and
@@ -519,6 +528,11 @@ fn handle_command(
                 active.end(detector, events);
             }
         }
+        ControllerCommand::Discard => {
+            if let Some(active) = recording.as_ref() {
+                active.throw_away(detector, events);
+            }
+        }
         ControllerCommand::KeepRecording => {
             if let Some(active) = recording.as_mut() {
                 let changed = active.call_switch.changed();
@@ -873,6 +887,8 @@ fn start_recording(
     }
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
+    let discard = Arc::new(AtomicBool::new(false));
+    let worker_discard = discard.clone();
     // Stop can send six updates before the controller next drains them.
     let (update_sender, updates) = mpsc::sync_channel(16);
     // A recording started by hand watches the call app it found on the
@@ -883,8 +899,14 @@ fn start_recording(
     };
     let call_switch = CallSwitch::with_kept(start.call, start.switched_from);
     let meeting_start = start.meeting;
-    let worker =
-        thread::spawn(move || meeting::record(meeting_start, &worker_stop, Some(update_sender)));
+    let worker = thread::spawn(move || {
+        meeting::record(
+            meeting_start,
+            &worker_stop,
+            Some(&worker_discard),
+            Some(update_sender),
+        )
+    });
     let _ = events.send(ControllerEvent::Starting(offer));
     *recording = Some(ActiveRecording {
         title: start.title,
@@ -897,6 +919,7 @@ fn start_recording(
         call_switch,
         call_stop: AutoStop::default(),
         stop,
+        discard,
         updates,
         reported_started: false,
         playback_locked_noted: false,
@@ -921,6 +944,8 @@ fn poll_recording(
                             id,
                             title,
                             automatic: active.automatic,
+                            app: active.app_label.clone(),
+                            application: icon_application(active.application.as_deref()),
                         });
                     }
                 }
@@ -956,6 +981,9 @@ fn poll_recording(
             .join()
             .unwrap_or_else(|_| Err(eyre!("meeting recorder panicked")))
         {
+            Ok(manifest) if active.discard.load(Ordering::Relaxed) => {
+                publication::discarded(manifest, events);
+            }
             Ok(manifest) => publication::finished(manifest, events),
             Err(error) => {
                 let _ = events.send(ControllerEvent::Failed {
@@ -1047,7 +1075,7 @@ fn poll_recording(
             let stops_at = auto_stop.then(|| active.auto_stop.arm());
             let _ = events.send(ControllerEvent::CallEnded {
                 app: active.app_label.clone(),
-                application: call_ended_icon_application(active.application.as_deref()),
+                application: icon_application(active.application.as_deref()),
                 stops_at,
             });
         }
@@ -1098,7 +1126,7 @@ fn poll_recording(
                     let stops_at = active.call_stop.arm();
                     let _ = events.send(ControllerEvent::CallEnded {
                         app: active.app_label.clone(),
-                        application: call_ended_icon_application(active.application.as_deref()),
+                        application: icon_application(active.application.as_deref()),
                         stops_at: Some(stops_at),
                     });
                 }
@@ -1128,14 +1156,6 @@ fn poll_recording(
     let stop_on_end = crate::app_settings::meeting_stop_when_call_ends();
     disarm_call_stop_unless_watching(recording, stop_on_end, detector, events);
     Ok(())
-}
-
-/// The native call app's ID for the call-ended capsule's icon; browsers
-/// return `None` so web calls show their service mark instead of the browser's.
-fn call_ended_icon_application(application: Option<&str>) -> Option<String> {
-    application
-        .filter(|id| !crate::microphone_activity::is_browser_id(Some(id)))
-        .map(str::to_owned)
 }
 
 /// Drops an armed stop whose call came back or whose setting went off (both share one notice).
@@ -1597,6 +1617,7 @@ mod tests {
             call_switch: CallSwitch::new(None),
             call_stop: AutoStop::default(),
             stop: Arc::new(AtomicBool::new(false)),
+            discard: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
             playback_locked_noted: false,
@@ -1638,6 +1659,7 @@ mod tests {
             call_switch: CallSwitch::new(call.map(str::to_string)),
             call_stop: AutoStop::default(),
             stop: Arc::new(AtomicBool::new(false)),
+            discard: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
             playback_locked_noted: false,
@@ -2041,6 +2063,7 @@ mod tests {
             call_switch: CallSwitch::new(None),
             call_stop: AutoStop::default(),
             stop: Arc::new(AtomicBool::new(false)),
+            discard: Arc::new(AtomicBool::new(false)),
             updates,
             reported_started: true,
             playback_locked_noted: false,

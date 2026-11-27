@@ -239,9 +239,10 @@ impl WindowsPaster {
 
     /// Pastes `text`, with Ctrl+Shift+V when `shift` asks for it or the
     /// saved Terminal paste setting is on. Java games still take Ctrl+V.
-    /// `return_to` is the window the capture started in: the desktop or a
-    /// taskbar takes no paste, so Hex returns there first and, when it can't,
-    /// leaves the transcript on the clipboard instead of sending it nowhere.
+    /// `return_to` is the window the capture started in: the desktop, a
+    /// taskbar, or the taskbar's overflow flyout takes no paste, so Hex
+    /// returns there first and, when it can't, leaves the transcript on the
+    /// clipboard instead of sending it nowhere.
     /// `standalone` pastes the text without joining the previous dictation
     /// and records no continuation for the next one (Labs › Signature).
     pub fn paste(
@@ -330,7 +331,8 @@ impl WindowsPaster {
         if copied {
             // Nothing in front takes a paste: the words stay on the
             // clipboard for Paste Last or a manual Ctrl+V instead of being
-            // sent to the desktop or taskbar and lost.
+            // sent to the desktop, a taskbar, or the taskbar's overflow
+            // flyout and lost.
             restore.keep();
             drop(restore);
             tracing::warn!(
@@ -358,9 +360,13 @@ impl WindowsPaster {
             shift_paste(shift, self.paste_with_shift.load(Ordering::Relaxed)),
         );
         if let Err(error) = send_paste_shortcut(shift) {
-            if let Some(generation) = generation {
-                restore_clipboard_generation(&self.clipboard_restore, generation);
-            }
+            // Windows refused the chord, so nothing was pasted: the
+            // transcript stays on the clipboard for a manual Ctrl+V or Paste
+            // Last instead of the old clipboard coming back over it (#2975).
+            self.clipboard_restore
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keep();
             return Err(error);
         }
         // Only a paste that reached the app is continued by the next one, and
@@ -398,9 +404,12 @@ impl WindowsPaster {
         let sent = send_inputs(&inputs);
         if sent != inputs.len() as u32 {
             send_inputs(&inputs[1..]);
-            return Err(eyre!(
-                "Windows accepted only {sent} of 2 synthetic Return events; an elevated target window may reject input"
-            ));
+            tracing::warn!(
+                sent,
+                total = inputs.len(),
+                "Windows rejected synthetic Return input; an elevated window or security software may block it"
+            );
+            return Err(eyre!("Windows blocked Hex's Return key"));
         }
         Ok(())
     }
@@ -516,9 +525,10 @@ fn key_down(key: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
 }
 
-/// Whether `window` is the desktop or a taskbar rather than a window a paste
-/// can land in. The window is not in front, so the foreground thread's focus
-/// says nothing about it: its class and process alone decide.
+/// Whether `window` is the desktop, a taskbar, or the taskbar's overflow
+/// flyout rather than a window a paste can land in. The window is not in
+/// front, so the foreground thread's focus says nothing about it: its class
+/// and process alone decide.
 pub(crate) fn is_shell_window(window: HWND) -> bool {
     if window.is_null() {
         return true;
@@ -582,10 +592,12 @@ fn send_paste_shortcut(shift: bool) -> Result<()> {
             .copied()
             .collect::<Vec<_>>();
         send_inputs(&cleanup);
-        return Err(eyre!(
-            "Windows accepted only {sent} of {} synthetic paste events; an elevated target window may reject input",
-            inputs.len()
-        ));
+        tracing::warn!(
+            sent,
+            total = inputs.len(),
+            "Windows rejected synthetic paste input; an elevated window or security software may block it"
+        );
+        return Err(eyre!(crate::paste::WINDOWS_PASTE_BLOCKED));
     }
     Ok(())
 }

@@ -79,7 +79,10 @@
     <string name="labs_recent_dictations_detail">Keep the last 50 dictations on this phone to copy again</string>
     <string name="recent_empty">No recent dictations yet</string>
     <string name="recent_clear">Clear history</string>
-    <string name="dictation_replacements">Word replacements</string>
-    <string name="dictation_replacements_detail">Replace spoken phrases automatically</string>
-    <string name="dictation_replacements_hint">spoken phrase =&gt; replacement</string>
+    <string name="bubble_battery_title">Keep bubble active overnight</string>
+    <string name="bubble_battery_detail">Allow unrestricted battery so Android doesn’t turn off Accessibility while sleeping</string>
+    <string name="bubble_battery_ready">Unrestricted</string>
+    <string name="setup_next_bubble">Turn on floating bubble</string>
+    <string name="setup_next_battery">Allow unrestricted battery</string>
+    <string name="bubble_allow">Allow</string>
 </resources>

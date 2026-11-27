@@ -2,17 +2,22 @@ package ly.anoma.hex.speech
 
 import java.util.Locale
 
-/** iOS's DictationPipeline and TranscriptFormatter: string rules only, no learned or remote rewriting. */
+/** iOS's DictationPipeline and TranscriptFormatter: string rules and Labs › Learn from my fixes' local word
+ * pairs, no remote rewriting. */
 internal object SpokenText {
-    /** Custom vocabulary, spoken symbols and counts, cleanup, the style, the vocabulary's spellings
-     * again (a style can capitalize "iPhone"), then Lowercase, the same wherever Hex dictates.
+    /** Custom vocabulary's Word replacements, Labs › Learn from my fixes' fixes (a Word replacement wins over a fix
+     * for the same heard words), custom vocabulary, spoken symbols and counts, cleanup, the style,
+     * the vocabulary's spellings again (a style can capitalize "iPhone"), then Lowercase, the same wherever Hex
+     * dictates. Fixes go first, on the raw transcript, so a learned spelling reaches every later stage unchanged.
      * Translation already happened in Whisper, so a translated dictation is English. */
     fun format(raw: String, options: SpeechOptions): String {
         val language = if (options.translate) "en" else options.spoken.code
-        val spelled = VocabularySpelling.apply(options.vocabulary, raw)
-        val replaced = TextReplacements.apply(options.replacements, spelled, options.vocabulary)
-        if (options.style == Style.Verbatim || replaced.isBlank()) return finished(style(replaced, options.style, language), options)
-        val spoken = SpokenCleanup.counts(SpokenCleanup.symbols(replaced.trim(), language), language)
+        // A translated dictation is the model's English: none of this phone's Word replacements or learned fixes touch it.
+        val fixed = if (options.translate) raw else DictationFixes.apply(
+            WordReplacements.without(options.fixes, options.replacements), WordReplacements.apply(options.replacements, raw))
+        val spelled = VocabularySpelling.apply(options.vocabulary, fixed)
+        if (options.style == Style.Verbatim || raw.isBlank()) return finished(style(spelled, options.style, language), options)
+        val spoken = SpokenCleanup.counts(SpokenCleanup.symbols(spelled.trim(), language), language)
         val cleaned = if (options.clean) SpokenCleanup.clean(spoken, language) else spoken
         val styled = style(cleaned, options.style, language, options.endWithPeriod, options.formatLists, options.spokenPunctuation)
         // French spacing goes last, since every style takes the spaces before marks out; Verbatim keeps the model's.
@@ -20,8 +25,7 @@ internal object SpokenText {
     }
 
     private fun finished(styled: String, options: SpeechOptions): String {
-        val spelled = VocabularySpelling.apply(options.vocabulary, styled)
-        val text = TextReplacements.apply(options.replacements, spelled, options.vocabulary)
+        val text = VocabularySpelling.apply(options.vocabulary, styled)
         return if (options.lowercase) text.lowercase(Locale.ROOT) else text
     }
 
@@ -47,7 +51,7 @@ internal object SpokenText {
         return when (style) {
             Style.Polished -> polish(cleaned, english)
             Style.Casual -> casual(cleaned, english)
-            else -> notes(cleaned, code(language))
+            else -> notes(cleaned, english)
         }
     }
 
@@ -270,20 +274,11 @@ internal object SpokenText {
 
     // Notes
 
-    private fun notes(text: String, lang: String): String {
+    private fun notes(text: String, english: Boolean): String {
         if (text.isEmpty()) return ""
-        val english = lang == "en"
-        val working = when (lang) {
-            "de" -> text.replace(Regex("(?iu)\\bneuer absatz\\b[,.]?\\s*"), "\n\n")
-                .replace(Regex("(?iu)\\bneue zeile\\b[,.]?\\s*"), "\n")
-                .replace(Regex("(?iu)(?:^|\\s+)(?:stichpunkt|aufzählungspunkt|nächster punkt)\\b[:,-]?\\s*"), "\n- ")
-            "es" -> text.replace(Regex("(?iu)\\bnuevo párrafo\\b[,.]?\\s*"), "\n\n")
-                .replace(Regex("(?iu)\\b(?:nueva línea|salto de línea)\\b[,.]?\\s*"), "\n")
-                .replace(Regex("(?iu)(?:^|\\s+)(?:viñeta|siguiente punto)\\b[:,-]?\\s*"), "\n- ")
-            else -> text.replace(Regex("(?i)\\bnew paragraph\\b[,.]?\\s*"), "\n\n")
-                .replace(Regex("(?i)\\bnew line\\b[,.]?\\s*"), "\n")
-                .replace(Regex("(?i)(?:^|\\s+)(?:bullet point|next bullet|bullet)\\b[:,-]?\\s*"), "\n- ")
-        }
+        val working = text.replace(Regex("(?i)\\bnew paragraph\\b[,.]?\\s*"), "\n\n")
+            .replace(Regex("(?i)\\bnew line\\b[,.]?\\s*"), "\n")
+            .replace(Regex("(?i)(?:^|\\s+)(?:bullet point|next bullet|bullet)\\b[:,-]?\\s*"), "\n- ")
         var lines = working.split('\n')
         if (lines.size == 1) {
             val line = fixSpacing(collapse(lines[0]))

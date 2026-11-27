@@ -2,8 +2,9 @@
 //! and invocation are both frozen: a late click can't act on the next list.
 //! Its rows are read from the press, so the picker opens the moment the hold
 //! passes, and once open it stays open until a choice, Escape, or a click
-//! outside it.
-use super::recent::{Id, Row};
+//! outside it. The first rows open it; the deep list replaces them once
+//! read, the selection kept on the item it was on.
+use super::recent::{Entry, Id};
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicU8, Ordering},
@@ -13,7 +14,7 @@ use std::sync::{
 pub(crate) struct View {
     pub epoch: u64,
     pub revision: u64,
-    pub rows: Arc<[Row]>,
+    pub rows: Arc<[Entry]>,
     pub cursor: usize,
     pub open: bool,
 }
@@ -23,13 +24,15 @@ struct State {
     outcome: Option<Choice>,
     armed: bool,
     /// Rows read before the hold passed, shown once it does.
-    staged: Option<Vec<Row>>,
+    staged: Option<Vec<Entry>>,
     /// The hold passed: rows open as soon as they are read.
     due: bool,
 }
 pub(crate) enum Choice {
     Cancel,
     Item(Id),
+    /// A capture to open in the editor. Nothing is pasted.
+    Open(Id),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Nav {
@@ -53,7 +56,7 @@ impl State {
     fn current(&self, epoch: u64) -> bool {
         self.armed && self.view.epoch == epoch && self.outcome.is_none()
     }
-    fn show(&mut self, epoch: u64, rows: Vec<Row>) {
+    fn show(&mut self, epoch: u64, rows: Vec<Entry>) {
         if !self.current(epoch) {
             return;
         }
@@ -72,15 +75,30 @@ impl State {
             self.open(rows);
         }
     }
-    fn open(&mut self, rows: Vec<Row>) {
+    fn open(&mut self, rows: Vec<Entry>) {
         self.view.rows = rows.into();
-        self.view.cursor = self
+        self.view.cursor = initial(&self.view.rows);
+        self.view.open = true;
+    }
+    /// The deep list, read after the first rows: it replaces them, and the
+    /// selection stays on the item it was on (or, with nothing selected yet,
+    /// moves to what a tap would paste).
+    fn extend(&mut self, epoch: u64, rows: Vec<Entry>) {
+        if !self.current(epoch) {
+            return;
+        }
+        if !self.view.open {
+            return self.show(epoch, rows);
+        }
+        let selected = self
             .view
             .rows
-            .iter()
-            .position(|r| !r.cancelled)
-            .unwrap_or(self.view.rows.len());
-        self.view.open = true;
+            .get(self.view.cursor)
+            .map(|r| r.row.id.clone());
+        self.view.rows = rows.into();
+        self.view.cursor = selected
+            .and_then(|id| self.view.rows.iter().position(|r| r.row.id == id))
+            .unwrap_or_else(|| initial(&self.view.rows));
     }
     fn finish(&mut self, choice: Choice) {
         if self.armed {
@@ -126,7 +144,7 @@ impl State {
                     .view
                     .rows
                     .get(self.view.cursor)
-                    .map(|r| Choice::Item(r.id.clone()))
+                    .map(|r| Choice::Item(r.row.id.clone()))
                     .unwrap_or(Choice::Cancel);
                 self.finish(choice);
             }
@@ -134,11 +152,39 @@ impl State {
         }
         true
     }
+    fn position(&self, epoch: u64, id: &Id) -> Option<usize> {
+        (self.view.open && self.view.epoch == epoch)
+            .then(|| self.view.rows.iter().position(|r| &r.row.id == id))
+            .flatten()
+    }
     fn pick(&mut self, epoch: u64, id: Id) {
-        if self.view.open && self.view.epoch == epoch && self.view.rows.iter().any(|r| r.id == id) {
+        if self.position(epoch, &id).is_some() {
             self.finish(Choice::Item(id));
         }
     }
+    /// A click on a row: it becomes the selection, and a click on the
+    /// selection pastes it, so a double click pastes any row.
+    fn select(&mut self, epoch: u64, id: Id) {
+        match self.position(epoch, &id) {
+            Some(at) if at == self.view.cursor => self.finish(Choice::Item(id)),
+            Some(at) => self.view.cursor = at,
+            None => {}
+        }
+    }
+    /// Open in Editor: a capture leaves for its editor, and nothing pastes.
+    fn open_capture(&mut self, epoch: u64, id: Id) {
+        if matches!(id, Id::Capture(_)) && self.position(epoch, &id).is_some() {
+            self.finish(Choice::Open(id));
+        }
+    }
+}
+
+/// What a tap would paste: the newest row not cancelled, else none (the
+/// cursor past the end).
+fn initial(rows: &[Entry]) -> usize {
+    rows.iter()
+        .position(|r| !r.row.cancelled)
+        .unwrap_or(rows.len())
 }
 
 static STATE: std::sync::LazyLock<Mutex<State>> = std::sync::LazyLock::new(Default::default);
@@ -173,8 +219,20 @@ pub(crate) fn available() -> bool {
 pub(crate) fn tap(epoch: u64) -> bool {
     update(|s| s.tap(epoch))
 }
-pub(crate) fn show(epoch: u64, rows: Vec<Row>) {
+pub(crate) fn show(epoch: u64, rows: Vec<Entry>) {
     update(|s| s.show(epoch, rows));
+}
+/// The deep list for invocation `epoch`, read after its first rows.
+pub(crate) fn extend(epoch: u64, rows: Vec<Entry>) {
+    update(|s| s.extend(epoch, rows));
+}
+/// Whether invocation `epoch` still waits on its rows: neither a tap nor a
+/// choice nor a newer press has claimed it.
+pub(crate) fn wants(epoch: u64) -> bool {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .current(epoch)
 }
 /// The hold passed: open now if the rows are read, else when they are.
 pub(crate) fn reveal(epoch: u64) {
@@ -189,8 +247,15 @@ pub(crate) fn open() -> bool {
 pub(crate) fn nav(key: Nav) -> bool {
     active() && update(|s| s.navigate(key))
 }
+/// Pastes row `id`: the preview's Paste.
 pub(crate) fn click(epoch: u64, id: Id) {
     update(|s| s.pick(epoch, id));
+}
+pub(crate) fn select(epoch: u64, id: Id) {
+    update(|s| s.select(epoch, id));
+}
+pub(crate) fn open_capture(epoch: u64, id: Id) {
+    update(|s| s.open_capture(epoch, id));
 }
 /// Closes the open picker without a paste: a click outside it, or Show all
 /// History, which consumes this invocation before activating the window.
@@ -240,6 +305,35 @@ pub(crate) fn key_use(key: Key, open: bool) -> KeyUse {
         _ => KeyUse::Close,
     }
 }
+/// What an Annotate capture records of the session's input while the
+/// picker is open over it: nothing it does there. Its clicks, scrolls, and
+/// keys choose a row and never mark the recording (or ink it, while
+/// drawing). A press the picker took keeps its release, even once that
+/// click has closed it.
+#[derive(Default)]
+pub(crate) struct Over {
+    press: bool,
+}
+
+impl Over {
+    /// Whether the picker takes `event`, so the capture never sees it.
+    pub(crate) fn takes(&mut self, event: &scrawl_capture::capture::InputEvent) -> bool {
+        self.decide(event, open())
+    }
+    fn decide(&mut self, event: &scrawl_capture::capture::InputEvent, open: bool) -> bool {
+        use scrawl_capture::capture::InputEvent as E;
+        match event {
+            E::ButtonDown { .. } => {
+                self.press = open;
+                open
+            }
+            E::ButtonUp { .. } => std::mem::take(&mut self.press) || open,
+            E::Scroll { .. } | E::KeyChord { .. } => open,
+            E::Move { .. } | E::Laser { .. } | E::Flag { .. } => false,
+        }
+    }
+}
+
 pub(crate) fn take(epoch: u64) -> Option<Choice> {
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
     (s.view.epoch == epoch).then(|| s.outcome.take()).flatten()
@@ -249,14 +343,173 @@ pub(crate) fn take(epoch: u64) -> Option<Choice> {
 mod tests {
     use super::*;
     use crate::history::paste_source;
-    fn row(id: u64) -> Row {
+    use crate::paste::recent::Row;
+    fn row(id: u64) -> Entry {
         Row {
             cancelled: false,
             id: Id::Dictation(paste_source::Id::Retained(id)),
             preview: format!("note {id}"),
             ready_at: id,
         }
+        .into()
     }
+    fn capture(at: u64) -> Entry {
+        Row {
+            cancelled: false,
+            id: Id::Capture(crate::capture_host::paste_source::Id::fixture(at)),
+            preview: "over the chart".into(),
+            ready_at: at,
+        }
+        .into()
+    }
+
+    /// A click selects and a click on the selection pastes; Open in Editor
+    /// sends a capture to its editor without pasting, and does nothing for
+    /// a dictation.
+    #[test]
+    fn a_click_selects_a_second_pastes_and_a_capture_opens_in_its_editor() {
+        let mut s = State::default();
+        let epoch = s.begin();
+        s.reveal(epoch);
+        s.show(epoch, vec![row(3), capture(2), row(1)]);
+        s.select(epoch, row(1).row.id);
+        assert_eq!(s.view.cursor, 2);
+        assert!(s.outcome.is_none() && s.view.open);
+        s.select(epoch, row(1).row.id);
+        assert!(matches!(s.outcome.take(), Some(Choice::Item(id)) if id == row(1).row.id));
+        assert!(!s.view.open);
+
+        let epoch = s.begin();
+        s.reveal(epoch);
+        s.show(epoch, vec![row(3), capture(2)]);
+        s.open_capture(epoch, row(3).row.id);
+        assert!(s.outcome.is_none() && s.view.open);
+        s.open_capture(epoch, capture(2).row.id);
+        assert!(matches!(s.outcome.take(), Some(Choice::Open(id)) if id == capture(2).row.id));
+        assert!(!s.view.open);
+    }
+    /// Newest first, as the reader lists them: ids `n - 1` down to 0.
+    fn list(n: u64) -> Vec<Entry> {
+        (0..n).rev().map(row).collect()
+    }
+
+    /// The picker opens on the first rows and the deep list replaces them,
+    /// the selection staying on the item it was on; every row of the deep
+    /// list can be moved to and chosen by its own identity. A deep list read
+    /// for a tap, or before the hold passed, never shows on its own.
+    #[test]
+    fn the_deep_list_replaces_the_first_rows_and_keeps_the_selection_on_its_item() {
+        let mut s = State::default();
+        let deep = list(300);
+        let first = deep[..16].to_vec();
+        let epoch = s.begin();
+        s.reveal(epoch);
+        s.show(epoch, first);
+        s.navigate(Nav::Next);
+        s.navigate(Nav::Next);
+        let selected = s.view.rows[2].row.id.clone();
+        s.extend(epoch, deep.clone());
+        assert_eq!(s.view.rows.len(), 300);
+        assert_eq!(s.view.rows[s.view.cursor].row.id, selected);
+        // ↑ from the top wraps to the oldest row, which only the deep list has.
+        s.view.cursor = 0;
+        s.navigate(Nav::Previous);
+        assert_eq!(s.view.cursor, 299);
+        // A click deep in the list selects that very item; a second pastes it.
+        let far = deep[250].row.id.clone();
+        s.select(epoch, far.clone());
+        assert_eq!(s.view.cursor, 250);
+        s.select(epoch, far.clone());
+        assert!(matches!(s.outcome.take(), Some(Choice::Item(id)) if id == far));
+
+        // Read before the hold passed: it waits for the hold, deep.
+        let epoch = s.begin();
+        s.show(epoch, deep[..16].to_vec());
+        s.extend(epoch, deep.clone());
+        assert!(!s.view.open);
+        s.reveal(epoch);
+        assert_eq!(s.view.rows.len(), 300);
+        assert_eq!(s.view.cursor, 0);
+
+        // A tap claimed it: its deep list is never read into a picker.
+        let epoch = s.begin();
+        s.show(epoch, deep[..16].to_vec());
+        assert!(s.tap(epoch));
+        assert!(!s.current(epoch));
+        s.extend(epoch, deep.clone());
+        assert!(!s.view.open && s.view.rows.is_empty());
+    }
+
+    /// With only cancelled rows first nothing is selected; the deep list
+    /// then selects what a tap would paste.
+    #[test]
+    fn a_deep_list_selects_what_a_tap_pastes_when_the_first_rows_had_nothing() {
+        let mut s = State::default();
+        let cancel = |id| {
+            let mut entry = row(id);
+            entry.row.cancelled = true;
+            entry
+        };
+        let epoch = s.begin();
+        s.reveal(epoch);
+        s.show(epoch, vec![cancel(9), cancel(8)]);
+        assert_eq!(s.view.cursor, 2);
+        s.extend(epoch, vec![cancel(9), cancel(8), row(7)]);
+        assert_eq!(s.view.cursor, 2);
+        assert_eq!(s.view.rows[2].row.id, row(7).row.id);
+    }
+
+    /// While the picker is open over an Annotate capture, its clicks,
+    /// scrolls, and keys are Hex's: the capture never records (or inks)
+    /// them. The click that closes it keeps its release; moves always pass.
+    #[test]
+    fn an_open_picker_keeps_its_clicks_scrolls_and_keys_out_of_a_capture() {
+        use scrawl_capture::capture::InputEvent as E;
+        let down = E::ButtonDown {
+            t_ms: 0,
+            x: 1.0,
+            y: 1.0,
+            right: false,
+            shift_only: false,
+        };
+        let up = E::ButtonUp {
+            t_ms: 1,
+            x: 1.0,
+            y: 1.0,
+            right: false,
+            shift_only: false,
+        };
+        let scroll = E::Scroll {
+            t_ms: 2,
+            x: 1.0,
+            y: 1.0,
+            dx: -4.0,
+            dy: 0.0,
+        };
+        let key = E::KeyChord {
+            t_ms: 3,
+            shortcut: "↓".into(),
+        };
+        let moved = E::Move {
+            t_ms: 4,
+            x: 2.0,
+            y: 2.0,
+            shift_only: false,
+        };
+        let mut over = Over::default();
+        for event in [&down, &up, &scroll, &key, &moved] {
+            assert!(!over.decide(event, false), "closed: {event:?}");
+        }
+        assert!(over.decide(&down, true));
+        assert!(over.decide(&scroll, true));
+        assert!(over.decide(&key, true));
+        assert!(!over.decide(&moved, true));
+        // The click chose a row and closed the picker before its release.
+        assert!(over.decide(&up, false));
+        assert!(!over.decide(&down, false));
+        assert!(!over.decide(&up, false));
+    }
+
     #[test]
     fn tap_and_cancel_claim_the_invocation_only_once() {
         let mut state = State::default();
@@ -274,13 +527,13 @@ mod tests {
     fn cancelled_needs_an_explicit_selection_even_when_it_is_the_only_row() {
         let mut state = State::default();
         let mut cancelled = row(3);
-        cancelled.cancelled = true;
+        cancelled.row.cancelled = true;
         let epoch = state.begin();
         state.reveal(epoch);
         state.show(epoch, vec![cancelled.clone(), row(2)]);
         assert_eq!(state.view.cursor, 1);
         state.navigate(Nav::Commit);
-        assert!(matches!(state.outcome.take(),Some(Choice::Item(id)) if id==row(2).id));
+        assert!(matches!(state.outcome.take(),Some(Choice::Item(id)) if id==row(2).row.id));
         let epoch = state.begin();
         state.reveal(epoch);
         state.show(epoch, vec![cancelled.clone()]);
@@ -291,7 +544,7 @@ mod tests {
         state.show(epoch, vec![cancelled.clone()]);
         state.navigate(Nav::Next);
         state.navigate(Nav::Commit);
-        assert!(matches!(state.outcome.take(),Some(Choice::Item(id)) if id==cancelled.id));
+        assert!(matches!(state.outcome.take(),Some(Choice::Item(id)) if id==cancelled.row.id));
     }
     #[test]
     fn escape_and_delayed_click_never_commit_to_another_invocation() {
@@ -303,12 +556,12 @@ mod tests {
         let two = s.begin();
         s.reveal(two);
         s.show(two, vec![row(2), row(1)]);
-        s.pick(one, row(1).id);
+        s.pick(one, row(1).row.id);
         assert!(s.outcome.is_none());
         s.navigate(Nav::Next);
         s.navigate(Nav::Commit);
-        assert!(matches!(s.outcome.take(),Some(Choice::Item(id)) if id==row(1).id));
-        s.pick(two, row(2).id);
+        assert!(matches!(s.outcome.take(),Some(Choice::Item(id)) if id==row(1).row.id));
+        s.pick(two, row(2).row.id);
         assert!(s.outcome.is_none());
     }
 

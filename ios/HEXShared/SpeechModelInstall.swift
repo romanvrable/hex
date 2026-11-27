@@ -48,6 +48,11 @@ nonisolated struct SpeechModelUnavailable: HexDescribedError, Equatable {
         }
     }
 
+    /// Beside Home's Use <language> button, which says the rest: without "Try English."
+    var lineBesideOffer: String {
+        String(localized: "\(Self.interfaceName(language)) isn't available on this iPhone yet.")
+    }
+
     /// "Russian", "Norwegian Bokmål": the language alone, in Hex's interface language.
     static func interfaceName(_ identifier: String) -> String {
         let code = Locale(identifier: identifier).language.languageCode?.identifier ?? identifier
@@ -59,9 +64,10 @@ nonisolated struct SpeechModelUnavailable: HexDescribedError, Equatable {
 /// In-keyboard dictation couldn't get its language's speech model ready itself: an asset
 /// released or removed since Hex downloaded it (each process holds its own reservation, and an
 /// unreserved one reads as not installed), a download the keyboard couldn't finish, or Speech
-/// listing nothing in the keyboard. Hex downloads it in the foreground, so the Hex key opens
-/// Hex until a model installs (`LanguageSettings.keyboardNeedsHex`). Never "Apple doesn't
-/// have your language": Speech listed the language, or listed nothing at all.
+/// listing nothing in the keyboard. Hex downloads it in the foreground, so until a model
+/// installs (`LanguageSettings.keyboardNeedsHex`) a dictation tap says so with Open Hex
+/// (`KeyboardDictationBlock.speechModel`). Never "Apple doesn't have your language": Speech
+/// listed the language, or listed nothing at all.
 nonisolated struct SpeechModelNeedsHex: HexDescribedError, Equatable {
     /// BCP 47, such as `en-US`.
     let language: String
@@ -71,7 +77,7 @@ nonisolated struct SpeechModelNeedsHex: HexDescribedError, Equatable {
     /// Short enough for the full keyboard's strip (about 60 characters).
     var errorDescription: String? {
         guard handedOff else { return UserFacingError.Context.transcription.fallback }
-        return String(localized: "Open Hex to download \(SpeechModelUnavailable.interfaceName(language)).")
+        return KeyboardDictationBlock.speechModel(language: language).line
     }
 
     /// Hands the keyboard's dictation to Hex for `language` and says so, the second time in a

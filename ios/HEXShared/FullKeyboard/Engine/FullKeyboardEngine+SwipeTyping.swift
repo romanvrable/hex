@@ -27,7 +27,7 @@ extension FullKeyboardEngine {
     /// swipe there types its next reading instead, and the strip may still offer them (Record
     /// typing logs: "two" swiped three times running for "yep", with "yep" in the strip). Taken
     /// back: delete took the whole word back, or deletes took out all its letters (Settings ›
-    /// Experiments › Delete swiped words letter by letter), with nothing else typed since the
+    /// Labs › Delete swiped words letter by letter), with nothing else typed since the
     /// swipe. One place: the text before it is the same, trailing spaces aside, in the same
     /// field. Every word taken back there in a row counts. Any other edit (a letter, a space,
     /// punctuation, a pick from the strip), a swipe somewhere else or another field forgets
@@ -157,7 +157,8 @@ extension FullKeyboardEngine {
     }
 
     /// A reading as it's typed: all capitals with caps lock, a capital first letter with
-    /// `capital`, else a name the dictionary only knows capitalised ("monday" -> "Monday").
+    /// `capital`, else the model's own spelling ("chatgpt" -> "ChatGPT") or a name the
+    /// dictionary only knows capitalised ("monday" -> "Monday").
     /// One of your own words with a capital that is also a common word (a Contacts name such
     /// as "Bell" or "Will") is written as the sentence needs it, as Apple's keyboard swipes
     /// "the bell rang" beside a contact Kate Bell (`AutocorrectEngine.withoutStrayCapital`).
@@ -170,6 +171,7 @@ extension FullKeyboardEngine {
         if !autoCapitalizes {
             return autocorrect.isOwnSpelling(word) ? word : word.lowercased()
         }
+        if let spelled = autocorrect.modelSpelling(of: word) { return spelled }
         if swipeReadsAsName(word) { return first.uppercased() + word.dropFirst() }
         return autocorrect.withoutStrayCapital(word, typed: "")
     }

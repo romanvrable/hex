@@ -100,7 +100,7 @@ use onboarding_kit::live::Page;
 use scenes::{SCENES, Scene, fixture, mac_fixture, portal_fixture};
 use settings::Capture;
 pub(crate) use shortcut_rule::shortcut_rules;
-use sidebar::{BuildKind, Pane, pane_header, sidebar};
+use sidebar::{BuildKind, Pane, pane_header, pane_header_rule, sidebar};
 
 /// How long typing pauses before a text field's edit is saved.
 const DRAFT_DELAY: Duration = Duration::from_millis(250);
@@ -464,7 +464,10 @@ pub(crate) fn show(ui: &mut Ui, destination: Destination, tx: &mut Tx) {
             ui.meetings.select(id);
         }
         #[cfg(hex_capture)]
-        Destination::RoutingRules => scrawl::routing_rules::open(ui),
+        Destination::RoutingRules => {
+            ui.captures.view = scrawl::View::Settings;
+            scrawl::routing_rules::open(ui);
+        }
         _ => {}
     }
 }
@@ -681,7 +684,7 @@ pub(crate) struct Ui {
     build_preview: Option<BuildKind>,
     /// A scene showing the Paste Last picker over the window.
     #[cfg(all(target_os = "macos", hex_capture))]
-    paste_preview: bool,
+    paste_preview: paste_picker::Preview,
     capture: Capture,
     vocabulary: vocabulary::VocabularyEditor,
     /// The model the service was last seen preparing, and since when.
@@ -700,6 +703,8 @@ pub(crate) struct Ui {
     /// the hex link, read when the pane opens and after an install.
     #[cfg(hex_capture)]
     agents: scrawl::Agents,
+    #[cfg(all(hex_capture, not(target_os = "macos")))]
+    capture_folder: Option<crate::desktop::file_dialog::Pending>,
     modes: modes::ModesPane,
     output: output::OutputPane,
     picker: picker::Picker,
@@ -709,6 +714,8 @@ pub(crate) struct Ui {
     sound_sets: sound_sets::SoundSets,
     /// Meetings › Settings' Calls sheet and the calls Hex has seen.
     calls: calls::Calls,
+    /// Meetings › Computer audio's app and output lists (Labs).
+    meeting_audio: meetings::audio_source::Listing,
     #[cfg(hex_capture)]
     routing: scrawl::routing_rules::Routing,
     tour: Option<onboarding::Tour>,
@@ -823,7 +830,7 @@ impl Ui {
             screenshot_folder: labs::screenshots::FolderChoice::default(),
             build_preview: None,
             #[cfg(all(target_os = "macos", hex_capture))]
-            paste_preview: false,
+            paste_preview: paste_picker::Preview::default(),
             capture: Capture::Idle,
             vocabulary,
             preparing: None,
@@ -836,6 +843,8 @@ impl Ui {
             captures: captures::CapturesPane::default(),
             #[cfg(hex_capture)]
             agents: scrawl::Agents::default(),
+            #[cfg(all(hex_capture, not(target_os = "macos")))]
+            capture_folder: None,
             modes,
             output: output::OutputPane::default(),
             picker: picker::Picker::default(),
@@ -843,6 +852,7 @@ impl Ui {
             explainer: explainer::Explainer::default(),
             sound_sets: sound_sets::SoundSets::default(),
             calls: calls::Calls::default(),
+            meeting_audio: meetings::audio_source::Listing::default(),
             #[cfg(hex_capture)]
             routing: scrawl::routing_rules::Routing::default(),
             tour: None,
@@ -1206,8 +1216,6 @@ impl Ui {
     /// Switches panes at once: the new pane replaces the old without a fade,
     /// already at rest (a grant's morph doesn't replay).
     fn select_pane(&mut self, pane: Pane, tx: &mut Tx) {
-        #[cfg(all(target_os = "macos", hex_capture))]
-        let pane = history::unified::destination(self, pane);
         let labs = std::mem::take(&mut self.labs_open);
         if self.pane == pane && !labs {
             return;
@@ -1380,7 +1388,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     );
     changed |= history::poll(ui);
     #[cfg(hex_capture)]
-    let mut changed = ui.captures.poll(ui.pane == Pane::Captures && !ui.labs_open) | changed;
+    let mut changed = scrawl::poll_list(ui) | changed;
     #[cfg(all(target_os = "macos", hex_capture))]
     {
         changed |= history::unified::poll(ui);
@@ -1403,6 +1411,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     changed |= modes::poll_chooser(ui);
     changed |= model_import::poll(ui);
     changed |= meetings::poll_import(ui);
+    changed |= meetings::audio_source::poll(ui, clock);
     changed |= vocabulary::poll(ui);
     // Labs › Screenshots' folder chooser, on macOS.
     #[cfg(all(target_os = "macos", hex_capture))]
@@ -1536,8 +1545,6 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         ),
         Pane::Modes => modes::pane(ui, p, &mut layer),
         Pane::History => history::pane(ui, p, &mut layer),
-        #[cfg(hex_capture)]
-        Pane::Captures => (Vec::new(), captures::pane(ui, p)),
         Pane::Meetings => meetings::pane(ui, p, &mut layer),
         #[cfg(hex_capture)]
         Pane::Annotate => (Vec::new(), scrawl::pane(ui, p, &mut layer)),
@@ -1570,12 +1577,16 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
             if ui.labs_open {
                 Some(labs::search_field(ui, p))
             } else {
-                (ui.pane == Pane::Meetings)
-                    .then(|| meetings::view_switch(ui, p))
-                    .flatten()
+                match ui.pane {
+                    Pane::Meetings => meetings::view_switch(ui, p),
+                    #[cfg(hex_capture)]
+                    Pane::Annotate => scrawl::view_switch(ui, p),
+                    _ => None,
+                }
             },
             actions,
         ))
+        .child(pane_header_rule(p))
         .child(body);
     // The OS window is the accessibility tree's root; this box adds nothing
     // to it.
@@ -1601,9 +1612,7 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         None => {}
     }
     #[cfg(all(target_os = "macos", hex_capture))]
-    if ui.paste_preview {
-        layer.push(paste_picker::preview(p));
-    }
+    layer.extend(paste_picker::preview(ui, p));
     if let Some(first_run) = onboarding_kit::live::overlay(ui, p, cx.is_reduced_motion()) {
         layer.push(first_run);
     }
@@ -1638,8 +1647,13 @@ fn window_focused(ui: &mut Ui, focused: bool, tx: &mut Tx) {
     }
 }
 
-/// How far a scroll body's top and bottom edges fade out.
-const SCROLL_FADE: (f32, f32) = (4.0, 24.0);
+/// How far a pane's scroll body fades at its top and bottom. The top inset
+/// is the room under the pane header's rule, so every pane's first card,
+/// field or row starts as far under it as the list-and-detail panes' do.
+const SCROLL_FADE: (f32, f32) = (list_detail::BODY_TOP, 24.0);
+/// A sheet's or a band's scroll body, which starts under its own header or
+/// controls rather than the pane header's rule.
+const SHEET_FADE: (f32, f32) = (4.0, 24.0);
 
 /// A vertically scrolling body whose edges fade out. At rest its content
 /// sits clear of the fades, so the first and last borders, rings, and fills

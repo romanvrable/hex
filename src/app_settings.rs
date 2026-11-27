@@ -331,6 +331,12 @@ pub struct AppSettings {
     /// register or match.
     #[serde(default)]
     pub extra_dictation_hotkeys: Vec<ExtraDictationHotkey>,
+    /// Labs › Model switch shortcut: swaps the dictation selection with
+    /// this saved model and language, and back. Unset goes nowhere.
+    pub model_switch_other: Option<KeyboardModelChoice>,
+    /// Labs › Model switch shortcut: the shortcut that swaps the dictation
+    /// model. Unbound by default and ignored while its Labs toggle is off.
+    pub model_switch_hotkey: Option<HotkeyBinding>,
     /// Labs › Terminal paste shortcut: another shortcut that dictates like
     /// `dictation_hotkey` and always pastes with Ctrl+Shift+V (Windows,
     /// Linux). Unbound by default and ignored while its Labs toggle is off.
@@ -447,7 +453,7 @@ const SCRAWL_IMPORT_MIGRATION: &str = "scrawl-capture-settings";
 #[cfg(hex_capture)]
 const SCRAWL_ROUTING_IMPORT_MIGRATION: &str = "scrawl-routing-settings";
 /// Meeting retention first saved `forever` as its default; that default is
-/// now unchosen (24 hours for new meetings, older ones kept).
+/// now unchosen (7 days for new meetings, older ones kept).
 const MEETING_RETENTION_DEFAULT_MIGRATION: &str = "meeting-retention-default";
 /// Summarize with Apple Intelligence and Summarize with OpenCode became one
 /// choice, `meetings.summaries`.
@@ -490,6 +496,8 @@ impl Default for AppSettings {
             raw_dictation_hotkey: None,
             typed_text_hotkey: None,
             second_dictation_hotkey: None,
+            model_switch_other: None,
+            model_switch_hotkey: None,
             extra_dictation_hotkeys: Vec::new(),
             terminal_paste_hotkey: None,
             show_dock_icon: true,
@@ -1132,6 +1140,9 @@ impl AppSettings {
             second_dictation: self
                 .active_second_dictation_hotkey()
                 .map(HotkeyBinding::runtime),
+            model_switch: self
+                .active_model_switch_hotkey()
+                .map(HotkeyBinding::runtime),
             extra_dictation: std::array::from_fn(|index| {
                 self.active_extra_dictation_hotkey(index)
                     .map(HotkeyBinding::runtime)
@@ -1160,6 +1171,20 @@ impl AppSettings {
             .as_ref()
             .filter(|binding| cfg!(target_os = "macos") || binding.key.is_some())
             .filter(|binding| !self.hotkey_in_use(HotkeySlot::SecondDictation, binding))
+    }
+
+    /// Labs › Model switch shortcut's binding while it takes effect: its
+    /// toggle on, a saved other model, bound with a key (every OS matches it
+    /// as a key press), and sharing no key with another active shortcut.
+    /// Otherwise nothing matches, suppresses, or registers it.
+    pub fn active_model_switch_hotkey(&self) -> Option<&HotkeyBinding> {
+        if !self.labs.model_switch_shortcut || self.model_switch_other.is_none() {
+            return None;
+        }
+        self.model_switch_hotkey
+            .as_ref()
+            .filter(|binding| binding.key.is_some())
+            .filter(|binding| !self.hotkey_in_use(HotkeySlot::ModelSwitch, binding))
     }
 
     /// Labs › Transform typed text's binding while it takes effect: Linux,
@@ -1368,6 +1393,21 @@ pub fn runtime_hotkeys() -> RuntimeHotkeys {
         hotkeys.capture_replay = None;
     }
     hotkeys
+}
+
+/// Paste Last's keycaps, from the settings last applied; none while it is
+/// unbound.
+#[cfg(all(target_os = "macos", hex_capture))]
+pub fn paste_last_keycaps() -> Vec<String> {
+    HOTKEYS
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .settings
+        .as_ref()
+        .and_then(|settings| settings.paste_last_hotkey.as_ref())
+        .map(HotkeyBinding::keycaps)
+        .unwrap_or_default()
 }
 
 /// Tests install the shortcuts the listener matches, without a settings file.

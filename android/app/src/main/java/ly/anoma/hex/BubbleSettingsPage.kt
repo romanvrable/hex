@@ -4,7 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,6 +31,51 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import ly.anoma.hex.bubble.*
+
+internal fun isBatteryUnrestricted(context: Context): Boolean =
+    context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true
+
+internal fun requestUnrestrictedBattery(context: Context) {
+    runCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+        )
+    }.onFailure {
+        runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+    }
+}
+
+@Composable
+internal fun BubbleHomeCards(setup: Setup, bubble: BubblePreferences, revision: Int) {
+    val context = LocalContext.current
+    val usesBubble = remember(revision) { bubble.usesBubble }
+    val bubbleEnabled = remember(revision) { bubble.enabled }
+    if (!usesBubble) return
+    if (!setup.batteryUnrestricted) {
+        Card {
+            Entry(
+                title = stringResource(R.string.bubble_battery_title),
+                note = stringResource(R.string.bubble_battery_detail),
+                value = stringResource(R.string.bubble_allow),
+                action = { requestUnrestrictedBattery(context) },
+                noteLines = 3,
+            )
+        }
+    }
+    if (setup.accessibility) {
+        Card {
+            Toggle(
+                stringResource(R.string.settings_bubble),
+                stringResource(if (bubbleEnabled) R.string.home_bubble_on_detail else R.string.home_bubble_off_detail),
+                bubbleEnabled
+            ) { on ->
+                bubble.enabled = on
+                if (!on) BubbleDictationService.stop(context)
+                HexAccessibilityService.instance?.refreshBubble()
+            }
+        }
+    }
+}
 
 @Composable
 internal fun BubbleSettingsContent(
@@ -107,11 +154,7 @@ internal fun BubbleSettingsContent(
             enabled
         ) { on ->
             bubble.enabled = on
-            if (on && setup.mic && setup.accessibility) {
-                BubbleDictationService.start(context)
-            } else if (!on) {
-                BubbleDictationService.stop(context)
-            }
+            if (!on) BubbleDictationService.stop(context)
             HexAccessibilityService.instance?.refreshBubble()
         }
         if (!setup.accessibility) {
@@ -123,6 +166,14 @@ internal fun BubbleSettingsContent(
                 openAccessibility
             )
         }
+        Rule()
+        Entry(
+            title = stringResource(R.string.bubble_battery_title),
+            note = stringResource(if (setup.batteryUnrestricted) R.string.bubble_battery_ready else R.string.bubble_battery_detail),
+            value = stringResource(R.string.bubble_allow),
+            action = if (setup.batteryUnrestricted) null else ({ requestUnrestrictedBattery(context) }),
+            noteLines = 3,
+        )
         Rule()
         SegmentedSetting(
             title = stringResource(R.string.bubble_input_mode),
@@ -139,11 +190,7 @@ internal fun BubbleSettingsContent(
             },
             onSelect = { next ->
                 bubble.inputMode = next
-                if (next.let { it == InputMode.Bubble || it == InputMode.Both } && bubble.enabled && setup.mic && setup.accessibility) {
-                    BubbleDictationService.start(context)
-                } else if (next == InputMode.Keyboard) {
-                    BubbleDictationService.stop(context)
-                }
+                if (next == InputMode.Keyboard) BubbleDictationService.stop(context)
                 HexAccessibilityService.instance?.refreshBubble()
             }
         )
@@ -281,10 +328,10 @@ internal fun RecentDictationsPage(revision: Int) {
         }
     }
     Card {
-        Entry(stringResource(R.string.recent_clear), value = "") {
+        Entry(stringResource(R.string.recent_clear), value = "", action = {
             DictationHistory.clear(context)
             clearCount++
-        }
+        })
     }
 }
 

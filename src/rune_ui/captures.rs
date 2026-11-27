@@ -101,6 +101,7 @@ impl Listed {
 
 #[derive(Default)]
 pub(super) struct CapturesPane {
+    pub(super) view: super::scrawl::View,
     pub(super) confirm_trash: Option<(u64, PathBuf)>,
     pub(super) entries: Vec<Listed>,
     search: TextEdit,
@@ -219,6 +220,7 @@ impl CapturesPane {
             PathBuf::from("/Users/alex/Library/Application Support/Scrawl/captures/1.scrawl");
         let annotation = Annotation {
             id: 4,
+            manifest_id: "1".into(),
             movie: Some(bundle.join("recording.mp4")),
             bundle,
             at_ms: now - 20 * 60_000,
@@ -353,40 +355,52 @@ pub(super) fn open(ui: &mut Ui, id: u64) {
         return;
     };
     #[cfg(target_os = "macos")]
-    {
-        use super::screenshot_thumbnail::editor;
-        let words = |text: &str, timed: &[CaptureWord], duration_ms: u64| {
-            words_for_editor(text, timed, duration_ms)
-                .into_iter()
-                .map(|word| editor::clip::Word {
-                    t0: word.t0,
-                    t1: word.t1,
-                    text: word.text,
-                })
-                .collect()
-        };
-        match entry {
-            Listed::Saved(entry) => match entry.kind {
+    match entry {
+        Listed::Saved(entry) => {
+            use super::screenshot_thumbnail::editor;
+            match entry.kind {
                 CaptureKind::Shot => editor::open_with(entry.file.clone(), entry.words.clone()),
                 CaptureKind::Recording => editor::open_recording(
                     entry.file.clone(),
-                    words(&entry.words, &entry.timed, entry.duration_ms),
+                    editor_words(&entry.words, &entry.timed, entry.duration_ms),
                 ),
-            },
-            Listed::Annotated(annotation) => {
-                if let Some(movie) = &annotation.movie {
-                    editor::open_recording(
-                        movie.clone(),
-                        words(&annotation.words, &annotation.timed, annotation.duration_ms),
-                    );
-                } else if let Some(picture) = &annotation.picture {
-                    editor::open_with(picture.clone(), annotation.words.clone());
-                }
             }
         }
+        Listed::Annotated(annotation) => open_annotation(annotation),
     }
     #[cfg(not(target_os = "macos"))]
     let _ = entry;
+}
+
+/// Opens an annotation in the editor: its movie to trim, or its picture
+/// once the movie has expired. Safe from any thread.
+#[cfg(target_os = "macos")]
+pub(super) fn open_annotation(annotation: &Annotation) {
+    use super::screenshot_thumbnail::editor;
+    if let Some(movie) = &annotation.movie {
+        editor::open_recording(
+            movie.clone(),
+            editor_words(&annotation.words, &annotation.timed, annotation.duration_ms),
+        );
+    } else if let Some(picture) = &annotation.picture {
+        editor::open_with(picture.clone(), annotation.words.clone());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn editor_words(
+    text: &str,
+    timed: &[CaptureWord],
+    duration_ms: u64,
+) -> Vec<super::screenshot_thumbnail::editor::clip::Word> {
+    words_for_editor(text, timed, duration_ms)
+        .into_iter()
+        .map(|word| super::screenshot_thumbnail::editor::clip::Word {
+            t0: word.t0,
+            t1: word.t1,
+            text: word.text,
+        })
+        .collect()
 }
 
 /// An entry's words for the editor: its own when the model timed them, else
@@ -417,44 +431,60 @@ pub(super) fn copy(ui: &mut Ui, id: u64) {
         return;
     };
     ui.captures.copied = None;
-    #[cfg(target_os = "macos")]
-    {
-        let spawned = std::thread::Builder::new()
-            .name("hex-capture-copy".into())
-            .spawn(move || {
-                let copied = match &entry {
-                    Listed::Saved(saved) => crate::screenshots::save::copy_saved(
-                        &saved.file,
-                        saved.kind == CaptureKind::Recording,
-                    ),
-                    Listed::Annotated(annotation) => objc2::rc::autoreleasepool(|_| {
-                        scrawl_capture::handoff::copy_bundle_to_clipboard(&annotation.bundle)
-                    }),
-                };
-                match copied {
-                    Ok(()) => *COPIED.lock().unwrap_or_else(|e| e.into_inner()) = Some(id),
-                    Err(error) => {
-                        tracing::warn!(error = format!("{error:#}"), "could not copy the capture");
-                        crate::feedback::play(crate::feedback::Tone::Error);
-                    }
-                }
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "could not copy the capture");
-        }
+    let spawned = std::thread::Builder::new()
+        .name("hex-capture-copy".into())
+        .spawn(move || match copy_entry(&entry) {
+            Ok(()) => *COPIED.lock().unwrap_or_else(|e| e.into_inner()) = Some(id),
+            Err(error) => {
+                tracing::warn!(error = format!("{error:#}"), "could not copy the capture");
+                crate::feedback::play(crate::feedback::Tone::Error);
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not copy the capture");
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = entry;
 }
 
+/// A shot's picture and file, a recording's file, or an annotation's
+/// summary on the clipboard, as the Mac's cards and Annotate copy them.
+#[cfg(target_os = "macos")]
+fn copy_entry(entry: &Listed) -> anyhow::Result<()> {
+    match entry {
+        Listed::Saved(saved) => {
+            crate::screenshots::save::copy_saved(&saved.file, saved.kind == CaptureKind::Recording)
+        }
+        Listed::Annotated(annotation) => objc2::rc::autoreleasepool(|_| {
+            scrawl_capture::handoff::copy_bundle_to_clipboard(&annotation.bundle)
+        }),
+    }
+}
+
+/// A saved shot or recording as a file (a file drop on Windows, a file URI
+/// on Linux), or an annotation's summary as Annotate's own Copy puts it.
+#[cfg(not(target_os = "macos"))]
+fn copy_entry(entry: &Listed) -> anyhow::Result<()> {
+    match entry {
+        Listed::Saved(saved) => crate::history::recordings::copy_to_clipboard(&saved.file),
+        Listed::Annotated(annotation) => crate::capture_host::copy_to_clipboard(&annotation.bundle),
+    }
+}
+
+/// What the reveal action reads: Finder on macOS, the file manager's
+/// folder (Explorer with the item selected, or its folder on Linux)
+/// elsewhere.
+pub(super) fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr("Show in Finder")
+    } else {
+        tr("Show in folder")
+    }
+}
+
+/// Shows entry `id`'s file selected in Finder or Explorer, or opens its
+/// folder on Linux.
 pub(super) fn reveal(ui: &mut Ui, id: u64) {
-    if let Some(entry) = ui.captures.entry(id)
-        && let Err(error) = std::process::Command::new("open")
-            .arg("-R")
-            .arg(entry.file())
-            .spawn()
-    {
-        tracing::warn!(%error, "could not show the capture in Finder");
+    if let Some(entry) = ui.captures.entry(id) {
+        crate::meeting::reveal(entry.file());
     }
 }
 
@@ -493,19 +523,29 @@ pub(super) fn trash(ui: &mut Ui, id: u64) {
 /// The search over the list, or the empty state.
 pub(super) fn pane(ui: &Ui, p: Paint) -> El {
     let pane = &ui.captures;
+    let screenshots = ui.settings.labs.screenshots;
     let searching = !pane.searched.trim().is_empty();
     if pane.entries.is_empty() && !searching {
-        return ld::empty_state(
-            p,
-            "captures-empty",
-            &CAPTURES_ICON,
-            tr("No captures yet."),
-            Some(tr(
-                "Shots, recordings, and annotations from the last 30 days show here.",
-            )),
-        );
+        let (icon, title, detail) = if screenshots {
+            (
+                &CAPTURES_ICON,
+                tr("No captures yet."),
+                tr("Shots, recordings, and annotations from the last 30 days show here."),
+            )
+        } else {
+            (
+                &super::sidebar::SCRAWL_ICON,
+                tr("No annotations yet."),
+                tr("Annotations from the last 30 days show here."),
+            )
+        };
+        return ld::empty_state(p, "captures-empty", icon, title, Some(detail));
     }
-    let mut list = col().key("captures-list").label(tr("Captures"));
+    let mut list = col().key("captures-list").label(if screenshots {
+        tr("Captures")
+    } else {
+        tr("Annotations")
+    });
     let count = pane.entries.len();
     for (index, entry) in pane.entries.iter().enumerate() {
         list = list.child(item(ui, p, entry).position_in_set(index + 1, count));
@@ -515,12 +555,20 @@ pub(super) fn pane(ui: &Ui, p: Paint) -> El {
             p,
             "captures-empty",
             ld::SEARCH_ICON,
-            tr("No captures match."),
+            if screenshots {
+                tr("No captures match.")
+            } else {
+                tr("No annotations match.")
+            },
             None,
         ));
     }
     let search = TextInput::new(&pane.search)
-        .placeholder(tr("Search captures"))
+        .placeholder(if screenshots {
+            tr("Search captures")
+        } else {
+            tr("Search annotations")
+        })
         .width(None)
         .leading_icon(p.k.glyph.search)
         .on_edit(|ui: &mut Ui| &mut ui.captures.search)
@@ -600,7 +648,7 @@ pub(super) fn item(ui: &Ui, p: Paint, entry: &Listed) -> El {
             p,
             "row-reveal",
             FINDER_ICON,
-            tr("Show in Finder"),
+            reveal_label(),
             move |ui: &mut Ui, _| reveal(ui, id),
         ),
         ld::row_action(

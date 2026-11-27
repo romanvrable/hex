@@ -56,7 +56,7 @@ private enum HexKeySide: CaseIterable {
     }
 }
 
-/// Settings › Keyboard: grouped by task into Layout, Typing, and Feedback so the page scans
+/// Settings › Keyboard: grouped by task into Layout, Typing, Feedback and Emoji so the page scans
 /// cleanly instead of one 11-row card.
 struct KeyboardSettingsPage: View {
     /// `KeyboardSetupMonitor.fullAccessOn`.
@@ -71,6 +71,10 @@ struct KeyboardSettingsPage: View {
     @State private var practiceText = ""
 
     private var settings: FullKeyboardSettings { FullKeyboardSettings() }
+
+    /// Hex is an iPhone app, so on an iPad its idiom says phone; the device's model doesn't.
+    /// There the keyboard has Apple's iPad rows: no number row, and key flicks instead.
+    private static let runsOnIPad = UIDevice.current.model.hasPrefix("iPad")
 
     private var fullKeyboard: Bool {
         _ = revision
@@ -87,9 +91,10 @@ struct KeyboardSettingsPage: View {
         return settings.haptics
     }
 
+    /// The emoji key or the strip's emoji suggestions: either keeps the emoji history.
     private var emoji: Bool {
         _ = revision
-        return settings.emoji
+        return settings.emojiKey || (fullKeyboard && settings.emojiSuggestions)
     }
 
     private func binding<T>(_ keyPath: WritableKeyPath<FullKeyboardSettings, T>) -> Binding<T> {
@@ -104,6 +109,12 @@ struct KeyboardSettingsPage: View {
                 revision += 1
             }
         )
+    }
+
+    /// Choosing a Strength plays one key tick at it, as the keyboard's keys will feel.
+    private func previewKeyTick(_ strength: KeyHapticStrength) {
+        UIImpactFeedbackGenerator(style: FullKeyboardView.keyTickStyle(strength))
+            .impactOccurred(intensity: FullKeyboardView.keyTickIntensity(strength))
     }
 
     /// The detail of a row that needs Full Access: none while it's on, and while it isn't, that
@@ -204,11 +215,19 @@ struct KeyboardSettingsPage: View {
 
                     SettingsDivider()
 
-                    SettingsToggleRow(
-                        title: String(localized: "Number row"),
-                        detail: String(localized: "Shows 1 to 0 above the letters"),
-                        isOn: binding(\.numberRow)
-                    )
+                    if Self.runsOnIPad {
+                        SettingsToggleRow(
+                            title: String(localized: "Key flicks"),
+                            detail: String(localized: "Pull a key down to type the character above its letter"),
+                            isOn: binding(\.keyFlicks)
+                        )
+                    } else {
+                        SettingsToggleRow(
+                            title: String(localized: "Number row"),
+                            detail: String(localized: "Shows 1 to 0 above the letters"),
+                            isOn: binding(\.numberRow)
+                        )
+                    }
                 }
             }
 
@@ -261,7 +280,7 @@ struct KeyboardSettingsPage: View {
                 }
             }
 
-            // Feedback & extras: key pop-ups, haptics, emoji.
+            // Feedback: key pop-ups and haptics. Emoji has its own card below.
             SettingsSectionHeader(title: "Feedback")
 
             SettingsCard {
@@ -294,22 +313,36 @@ struct KeyboardSettingsPage: View {
                             onSelect: { choice in
                                 FullKeyboardSettings().hapticStrength = choice
                                 revision += 1
+                                previewKeyTick(choice)
                             }
                         )
                     }
                     .padding(.horizontal, 16)
                     .frame(minHeight: 50)
                 }
+            }
 
-                SettingsDivider()
+            SettingsSectionHeader(title: "Emoji")
 
+            SettingsCard {
                 SettingsToggleRow(
-                    title: String(localized: "Emoji"),
+                    title: String(localized: "Emoji key"),
                     detail: fullKeyboard
-                        ? String(localized: "Emoji key and suggestions")
+                        ? String(localized: "Opens all emoji from the keyboard")
                         : String(localized: "An emoji key on the dictation bar"),
-                    isOn: binding(\.emoji)
+                    isOn: binding(\.emojiKey)
                 )
+
+                // The dictation bar has no strip to suggest in.
+                if fullKeyboard {
+                    SettingsDivider()
+
+                    SettingsToggleRow(
+                        title: String(localized: "Emoji suggestions"),
+                        detail: String(localized: "Suggests 😭 as you type cry"),
+                        isOn: binding(\.emojiSuggestions)
+                    )
+                }
 
                 if emoji {
                     SettingsDivider()

@@ -15,7 +15,7 @@ use super::controls::{
 };
 use crate::desktop::i18n::tr;
 
-const LIST_WIDTH: f32 = 320.0;
+const LIST_WIDTH: f32 = METRICS.list_w;
 /// A [`list_row`]'s text inset.
 const LIST_ROW_PX: f32 = 10.0;
 /// A list column's leading padding, which puts its rows' text on the pane
@@ -69,6 +69,39 @@ pub(super) fn tone_tag(p: Paint, key: &str, label: &str, tone: Tone) -> El {
         )
 }
 
+/// A [`status_pill`]'s height.
+pub(super) const PILL_H: f32 = 20.0;
+/// A [`status_pill`]'s dot.
+const PILL_DOT: f32 = 5.5;
+
+/// A soft status pill, never pressable: a borderless capsule washed in the
+/// tone's ink, a small dot, and the label in that ink. It reports a live
+/// state (Recording) where a [`tone_tag`] would name a kind.
+pub(super) fn status_pill(p: Paint, key: &str, label: &str, tone: Tone) -> El {
+    let (_, _, ink) = tone.colors(p);
+    let wash = if p.k.dark { 0.16 } else { 0.12 };
+    let mut font = p.k.ty.small_medium.lh(12.0);
+    font.size = 11.5;
+    row()
+        .key(key)
+        .role("status")
+        .label(label)
+        .h(PILL_H)
+        .px(8.0)
+        .gap(5.0)
+        .center_y()
+        .radius(999.0)
+        .fill(ink.alpha(wash))
+        .child(
+            el().key("dot")
+                .size(PILL_DOT, PILL_DOT)
+                .radius(PILL_DOT / 2.0)
+                .fill(ink)
+                .a11y_hidden(),
+        )
+        .child(text(label).key("label").font(font).color(ink))
+}
+
 /// A list's group heading (a task, a day).
 pub(super) fn group_label(p: Paint, key: &str, label: &str, first: bool) -> El {
     text(label)
@@ -77,7 +110,7 @@ pub(super) fn group_label(p: Paint, key: &str, label: &str, first: bool) -> El {
         .level(3)
         .font(p.k.ty.small_medium)
         .color(p.faint())
-        .px(10.0)
+        .px(LIST_ROW_PX)
         .pt(group_label_top(first))
         .pb(GROUP_LABEL_BOTTOM)
 }
@@ -193,7 +226,7 @@ pub(super) fn list_row(
 pub(super) fn message(p: Paint, key: &str, title: &str, detail: Option<&str>) -> El {
     col()
         .key(key)
-        .px(10.0)
+        .px(LIST_ROW_PX)
         .py(24.0)
         .gap(4.0)
         .child(
@@ -218,7 +251,7 @@ pub(super) fn error_panel(p: Paint, key: &str, title: &str, detail: &str, tone: 
     col()
         .key(key)
         .px(12.0)
-        .py(10.0)
+        .py(8.0)
         .gap(2.0)
         .radius(p.k.radius.md)
         .fill(fill)
@@ -311,7 +344,7 @@ pub(super) fn placeholder(p: Paint, key: &str, copy: &str) -> El {
             .color(p.muted())
             .align(rune::Align::Center)
             .wrap()
-            .w(280.0),
+            .w(METRICS.copy_w),
     )
 }
 
@@ -361,7 +394,7 @@ pub(super) fn fact(p: Paint, key: &str, label: &str, value: &str) -> El {
                 .key("label")
                 .font(DESCRIPTION)
                 .color(p.muted())
-                .w(120.0),
+                .w(METRICS.fact_label_w),
         )
         .child(
             text(value)
@@ -383,6 +416,9 @@ pub(super) enum PermissionControl {
     /// Returned from System Settings still untrusted: resets stale TCC
     /// entries and reopens the prompt and guide.
     Stale,
+    /// Returned from System Settings still untrusted where only a restart can
+    /// see the grant (macOS 27.3's post-event preflight), so nothing is reset.
+    Restart,
     Allowed,
 }
 
@@ -460,6 +496,13 @@ pub(super) fn permission_control(
                 ButtonKind::Secondary,
                 move |ui: &mut Ui, _| allow(ui),
             ),
+        ),
+        PermissionControl::Restart => (
+            None,
+            12.0,
+            button(p, key, tr("Restart Hex"), kind, move |ui: &mut Ui, _| {
+                allow(ui)
+            }),
         ),
         PermissionControl::Allowed => (Some(check_mark(p)), 6.0, allowed_pill(p, key, kind)),
     };
@@ -700,7 +743,7 @@ pub(super) fn slider_in<S: 'static>(
                 .child(
                     text(display.clone())
                         .key("value")
-                        .font(p.k.ty.mono)
+                        .font(p.tabular(p.description()))
                         .color(p.faint()),
                 )
                 // The slider reads its name and value.
@@ -723,7 +766,7 @@ pub(super) fn inline_slider(
     row()
         .key(key)
         .center_y()
-        .gap(10.0)
+        .gap(8.0)
         .child(slider_track(p, label, value, display.clone(), width, set))
         .child(
             row()
@@ -731,7 +774,11 @@ pub(super) fn inline_slider(
                 .w(36.0)
                 .justify_end()
                 .a11y_hidden()
-                .child(text(display).font(p.k.ty.mono).color(p.faint())),
+                .child(
+                    text(display)
+                        .font(p.tabular(p.description()))
+                        .color(p.faint()),
+                ),
         )
 }
 

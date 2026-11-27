@@ -2235,15 +2235,7 @@ pub fn write_bundle_artifacts(
 /// Writes `scrawl.json` atomically (a temporary file renamed into place): the last step of a
 /// build, which marks the bundle finished.
 pub fn publish_manifest(out_dir: &Path, bundle: &crate::model::ScrawlBundle) -> Result<()> {
-    let manifest_bytes = serde_json::to_vec_pretty(bundle)?;
-    let tmp = out_dir.join(".scrawl.json.tmp");
-    crate::routing::undo::write_private(&tmp, &manifest_bytes)
-        .with_context(|| format!("could not write {}", tmp.display()))?;
-    if let Err(error) = std::fs::rename(&tmp, out_dir.join("scrawl.json")) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error).context("could not publish scrawl.json");
-    }
-    Ok(())
+    scrawl_router::bundle::publish(out_dir, bundle)
 }
 
 /// Everything [`write_bundle_artifacts`] writes except the manifest.
@@ -2293,12 +2285,14 @@ pub fn is_scrawl_app_running() -> bool {
     {
         use objc2_app_kit::NSRunningApplication;
         use objc2_foundation::NSString;
-        let current_pid = std::process::id() as i32;
-        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
-            &NSString::from_str(SCRAWL_BUNDLE_ID),
-        );
-        apps.iter()
-            .any(|app| app.processIdentifier() != current_pid && !app.isTerminated())
+        objc2::rc::autoreleasepool(|_| {
+            let current_pid = std::process::id() as i32;
+            let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &NSString::from_str(SCRAWL_BUNDLE_ID),
+            );
+            apps.iter()
+                .any(|app| app.processIdentifier() != current_pid && !app.isTerminated())
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {

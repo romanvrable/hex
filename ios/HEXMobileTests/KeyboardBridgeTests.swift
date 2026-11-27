@@ -415,6 +415,16 @@ final class KeyboardBridgeTests: XCTestCase {
         XCTAssertFalse(request.isHandoffExpired(at: 1_000_000))
     }
 
+    /// The Hex key menu's Open Hex: Hex at Home, no session started.
+    func testHomeLaunchOpensHexAtHomeWithoutAHandoff() {
+        let request = KeyboardLaunchRequest.home
+        XCTAssertEqual(request.url.absoluteString, "hex-dictation://keyboard/home")
+        XCTAssertEqual(KeyboardLaunchRequest(url: request.url), request)
+        XCTAssertTrue(request.opensPage)
+        XCTAssertNil(request.requestedAt)
+        XCTAssertFalse(request.isHandoffExpired(at: 1_000_000))
+    }
+
     func testTranslationSettingsLaunchOpensAPageWithoutAHandoff() {
         let request = KeyboardLaunchRequest.translationSettings
         XCTAssertEqual(request.url.absoluteString, "hex-dictation://keyboard/translation")
@@ -554,6 +564,21 @@ final class KeyboardBridgeTests: XCTestCase {
         XCTAssertTrue(KeyboardBridge(defaults: defaults).isKeyboardShown(now: now))
         bridge.recordKeyboardHidden(at: now)
         XCTAssertFalse(KeyboardBridge(defaults: defaults).isKeyboardShown(now: now))
+    }
+
+    /// "Hex is ready" showed a Try again with nothing to retry (1.0.5 quality review).
+    func testOnboardingsLastPageOffersTryAgainOnlyWithSomethingLeft() {
+        func left(model: Bool = true, mic: Bool = true, keyboard: Bool? = true, fullAccess: Bool = true) -> OnboardingLeft {
+            OnboardingLeft.resolve(modelReady: model, microphoneGranted: mic, keyboardAdded: keyboard, fullAccessOn: fullAccess)
+        }
+        XCTAssertEqual(left(), .nothing)
+        XCTAssertFalse(left().offersTryAgain, "Hex is ready: nothing to try again")
+        XCTAssertEqual(left(model: false, mic: false), .model)
+        XCTAssertFalse(left(model: false).offersTryAgain, "the model's card has its own Try again")
+        XCTAssertTrue(left(mic: false).offersTryAgain)
+        XCTAssertTrue(left(keyboard: false).offersTryAgain)
+        XCTAssertTrue(left(keyboard: nil, fullAccess: false).offersTryAgain, "use the keyboard once in the practice")
+        XCTAssertEqual(left(keyboard: nil), .nothing, "a keyboard not known to be missing isn't left")
     }
 
     func testOnboardingPracticeCountsADictationOrAFewTypedWords() {
@@ -922,29 +947,20 @@ final class KeyboardBridgeTests: XCTestCase {
         XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .fifteenMinutes, "no speech model in the keyboard")
         languages.clearKeyboardNeedsHex()
 
+        // The multilingual model never takes dictation away from the keyboard: it dictates
+        // that model's languages itself, with Apple's speech recognition until it has the model.
         languages.chooseDictationLanguage("nl-NL")
         let multilingual = MultilingualParakeetSettings(defaults: defaults)
         multilingual.isEnabled = true
-        multilingual.isModelReady = true
         let keyboardParakeet = KeyboardParakeetSettings(defaults: defaults)
         XCTAssertTrue(keyboardParakeet.isEnabled, "Speech model in keyboard is on by default")
-        if MultilingualParakeetSettings.fits() {
-            XCTAssertEqual(
-                bridge.defaultWarmDuration(osMajorVersion: 26, now: now),
-                .fifteenMinutes,
-                "on by default, but only Hex has the multilingual model loaded"
-            )
-            keyboardParakeet.setKeyboardState(.ready)
-            XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .fifteenMinutes, "the keyboard has V2, not it")
-            keyboardParakeet.setKeyboardState(.preparing, multilingual: true)
-            XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .fifteenMinutes, "still loading it")
-        }
+        XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .off, "only Hex has the multilingual model loaded")
+        keyboardParakeet.setKeyboardState(.preparing, multilingual: true)
+        XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .off, "the keyboard is still loading it")
         keyboardParakeet.setKeyboardState(.ready, multilingual: true)
-        XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .off, "the keyboard has it loaded and dictates it")
+        XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .off, "the keyboard has it loaded")
         keyboardParakeet.isEnabled = false
-        if MultilingualParakeetSettings.fits() {
-            XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .fifteenMinutes, "Speech model in keyboard off")
-        }
+        XCTAssertEqual(bridge.defaultWarmDuration(osMajorVersion: 26, now: now), .off, "Speech model in keyboard off")
         multilingual.isEnabled = false
 
         bridge.warmDuration = .oneHour
@@ -1469,7 +1485,7 @@ final class DictationLanguageSwitchTests: XCTestCase {
         )
     }
 
-    /// Experiments › Hinglish offers Hindi in the Hex key's language menu, named Hinglish.
+    /// Labs › Hinglish offers Hindi in the Hex key's language menu, named Hinglish.
     func testHinglishOffersHindiByThatName() throws {
         let suite = "hex.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -1500,7 +1516,7 @@ final class DictationLanguageSwitchTests: XCTestCase {
         )
     }
 
-    /// Experiments › Greeklish offers Greek in the Hex key's language menu, named Greeklish,
+    /// Labs › Greeklish offers Greek in the Hex key's language menu, named Greeklish,
     /// the way Hinglish offers Hindi.
     func testGreeklishOffersGreekByThatName() throws {
         let suite = "hex.tests.\(UUID().uuidString)"

@@ -6,7 +6,7 @@ import Foundation
 /// Settings › Dictation › Speech model in keyboard (on unless turned off): the keyboard's own dictation
 /// transcribed with Parakeet on the Neural Engine, in the keyboard's process, so Hex needn't be
 /// open or warm.
-/// English uses Parakeet V2; a language Experiments › Multilingual model dictates uses Parakeet
+/// English uses Parakeet V2; a language Settings › Dictation › Model: Multilingual dictates uses Parakeet
 /// Ultra. Both load from the App Group (`SpeechModelStore`), after the keyboard's first frame
 /// and launch work (`warmUp`), and stay loaded while the keyboard's process lives, until a
 /// memory warning. The first load compiles the model for the Neural Engine (17 s for V2, 12 s
@@ -51,7 +51,7 @@ final class KeyboardParakeet {
     private var releasesAfterTranscription = false
     private var lastNote = ""
 
-    /// iOS ends nothing for a load past this; the keyboard stops saying it's getting ready.
+    /// A load past this is logged; it goes on, and Hex's row stops saying it's getting ready.
     static let loadPatience: TimeInterval = 180
     /// Evidence the model is on the Neural Engine: the keyboard's Neural Engine memory, which
     /// rose 468 MB (V2) and 607 MB (Ultra) on the iPhone 17 Pro.
@@ -69,39 +69,59 @@ final class KeyboardParakeet {
         return Choice(multilingual: picked.model.isMultilingual, language: picked.language)
     }
 
-    /// Whether the keyboard dictates the multilingual model's language itself now, so the Hex
-    /// key needn't open Hex for it.
-    var dictatesMultilingualHere: Bool {
-        guard let loaded, loaded.multilingual else { return false }
-        return Self.choice()?.multilingual == true
-    }
-
     /// After the keyboard's first frame and launch work: notes the keyboard's memory limit for
     /// Hex's download, then loads the model it would use, off the main thread, when it fits.
-    func warmUp() {
+    /// `memoryWarned`: iOS warned the keyboard's view controller about memory since it opened.
+    func warmUp(memoryWarned: Bool = false) {
         let measured = Self.memory()
         if measured.available > 0 {
             KeyboardParakeetSettings().recordKeyboardLimit(measured.footprint + measured.available)
         }
+        // No model for this keyboard (`KeyboardParakeetPlan`): Hex reads the same plan and says
+        // why itself (a limit under 131 MB, another language, nothing downloaded).
         guard let choice = Self.choice() else { return }
-        if loaded?.multilingual == choice.multilingual { return }
-        guard loadTask == nil, !setAside.contains(choice.multilingual) else { return }
-        if let warned = memoryWarnedAt, Date().timeIntervalSince(warned) < Self.reloadAfterWarning { return }
-        let memory = Self.memory()
         let settings = KeyboardParakeetSettings()
+        if loaded?.multilingual == choice.multilingual {
+            // Still loaded: say so again if Hex cleared it (the switch turned off and on).
+            if settings.keyboardState?.state != .ready {
+                settings.setKeyboardState(.ready, multilingual: choice.multilingual)
+            }
+            return
+        }
+        // Try again in Hex, or a model Hex removed: what didn't load in this process may load now.
+        if settings.purgesCompiled { setAside.removeAll() }
+        // A load in flight said `.preparing`; one set aside said why when it was.
+        guard loadTask == nil, !setAside.contains(choice.multilingual) else { return }
+        // iOS warned this keyboard about memory (this view controller, or within
+        // `reloadAfterWarning`): no load, and the page says so rather than what an older
+        // keyboard last said.
+        if memoryWarned || memoryWarnedAt.map({ Date().timeIntervalSince($0) < Self.reloadAfterWarning }) == true {
+            note("parakeet: \(choice.label) not loaded after a memory warning")
+            settings.setKeyboardState(.unavailable, multilingual: choice.multilingual, reason: .shortOfMemory)
+            return
+        }
+        let memory = Self.memory()
         guard KeyboardParakeetBudget.allowsLoad(footprint: memory.footprint, available: memory.available) else {
             note("parakeet: \(choice.label) not loaded, short of memory \(memory)")
-            settings.setKeyboardState(.unavailable)
+            // What was free goes with it, for Settings' line; it stays on the iPhone.
+            settings.setKeyboardState(
+                .unavailable, multilingual: choice.multilingual, reason: .shortOfMemory, free: memory.available
+            )
             return
         }
         guard Self.hasNeuralEngine else {
             note("parakeet: no Neural Engine here")
             setAside.insert(choice.multilingual)
-            settings.setKeyboardState(.unavailable)
+            settings.setKeyboardState(.unavailable, multilingual: choice.multilingual, reason: .noNeuralEngine)
             return
         }
         if loaded != nil { release(reason: "language changed") }
-        settings.setKeyboardState(.preparing)
+        // Hex removed the model the person switched away from: its compiled copy goes too.
+        if settings.purgesCompiled {
+            settings.purgesCompiled = false
+            Self.purgeCompiledModels()
+        }
+        settings.setKeyboardState(.preparing, multilingual: choice.multilingual)
         KeyboardProbeLog.shared.write("parakeet: loading \(choice.label) \(memory)")
         let started = Date()
         loadTask = Task { [weak self] in
@@ -122,13 +142,14 @@ final class KeyboardParakeet {
                 guard onEngine else {
                     await manager.cleanup()
                     self.setAside.insert(choice.multilingual)
-                    settings.setKeyboardState(.unavailable)
+                    settings.setKeyboardState(.unavailable, multilingual: choice.multilingual, reason: .notOnNeuralEngine)
                     KeyboardProbeLog.shared.write("parakeet: \(choice.label) not on the Neural Engine, Apple's speech recognition \(Self.memory())")
                     return
                 }
                 let cold = seconds >= Self.compilingLoad
                 self.loaded = Loaded(multilingual: choice.multilingual, manager: manager, seconds: seconds, cold: cold, at: Date())
                 settings.setKeyboardState(.ready, multilingual: choice.multilingual)
+                settings.setLoadedOnce(true, multilingual: choice.multilingual)
                 KeyboardProbeLog.shared.write(
                     "parakeet: \(choice.label) loaded in \(String(format: "%.1f", seconds)) s (\(cold ? "cold" : "warm")) \(after)"
                 )
@@ -136,14 +157,16 @@ final class KeyboardParakeet {
                 guard let self else { return }
                 self.loadTask = nil
                 self.setAside.insert(choice.multilingual)
-                settings.setKeyboardState(.unavailable)
+                settings.setKeyboardState(.unavailable, multilingual: choice.multilingual, reason: .loadFailed)
                 KeyboardProbeLog.shared.write("parakeet: \(choice.label) didn't load: \(error) \(Self.memory())")
             }
         }
+        // A load still going isn't one the keyboard can't use, so it's only logged. It used to
+        // say `.unavailable`: a keyboard suspended mid-load that came back after 3 minutes said
+        // so seconds before the load finished.
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.loadPatience))
             guard let self, self.loadTask != nil, self.loaded == nil else { return }
-            KeyboardParakeetSettings().setKeyboardState(.unavailable)
             KeyboardProbeLog.shared.write("parakeet: \(choice.label) still loading after \(Int(Self.loadPatience)) s")
         }
     }
@@ -235,6 +258,24 @@ final class KeyboardParakeet {
         guard message != lastNote else { return }
         lastNote = message
         KeyboardProbeLog.shared.write(message)
+    }
+
+    /// Removes Core ML's compiled copies in the keyboard's Caches (`com.apple.e5rt.e5bundlecache`,
+    /// 234 MB for English's model on an iPhone 17 Pro), once Hex removed the model the person
+    /// switched away from (`KeyboardParakeetSettings.purgesCompiled`). Only before a load, with
+    /// nothing loaded: the picked model compiles again (12 to 17 s, Apple's speech recognition
+    /// meanwhile). The Neural Engine's own cache is iOS's (`com.apple.aned`), out of reach.
+    nonisolated static func purgeCompiledModels() {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        var folders = [caches.appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true)]
+        if let bundle = Bundle.main.bundleIdentifier {
+            folders.append(caches.appendingPathComponent(bundle, isDirectory: true)
+                .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true))
+        }
+        for folder in folders where FileManager.default.fileExists(atPath: folder.path) {
+            let removed = (try? FileManager.default.removeItem(at: folder)) != nil
+            KeyboardProbeLog.shared.write("parakeet: compiled copies \(removed ? "removed" : "not removed") at \(folder.lastPathComponent)")
+        }
     }
 
     // MARK: - Loading
@@ -378,6 +419,7 @@ private nonisolated final class FootprintPeak: @unchecked Sendable {
 enum KeyboardTranscription {
     static func transcribe(_ url: URL, hints: [String], audioSeconds: Double) async throws -> (String, SpeechLanguage, String) {
         if let parakeet = await KeyboardParakeet.shared.transcribe(url, audioSeconds: audioSeconds) {
+            noteLanguage(parakeet.language)
             return (parakeet.text, parakeet.language, parakeet.engine)
         }
         let started = Date()
@@ -389,6 +431,12 @@ enum KeyboardTranscription {
             ))
         }
         let engine = language.module == .dictation ? "Apple Speech (keyboard, DictationTranscriber)" : "Apple Speech (keyboard)"
+        noteLanguage(language)
         return (text, language, engine)
+    }
+
+    /// For Settings' Translate what I say, which checks the pair the keyboard translates.
+    private static func noteLanguage(_ language: SpeechLanguage) {
+        DictationTranslationSettings().noteKeyboardDictation(in: language.identifier, languages: LanguageSettings())
     }
 }

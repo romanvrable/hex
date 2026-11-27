@@ -17,7 +17,7 @@ class ArmActivity : Activity() {
         val autoDictate = intent?.getBooleanExtra(EXTRA_START_DICTATION, false) == true
         val micGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (micGranted) {
-            val started = BubbleDictationService.start(this)
+            val started = BubbleDictationService.startFromForegroundActivity(this)
             if (started && autoDictate) {
                 Handler(Looper.getMainLooper()).postDelayed({
                     HexAccessibilityService.instance?.beginBubbleSpeech(fromArm = true)

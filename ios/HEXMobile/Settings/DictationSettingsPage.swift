@@ -55,6 +55,8 @@ struct DictationSettingsPage: View {
     @State private var revision = 0
     @State private var keyboardParakeet = KeyboardParakeetSettings().isOn
     private let keyboardParakeetFits = KeyboardParakeetSettings.fits()
+    /// English or Multilingual (`SpeechModelChoice`), on iPhones with the memory for either.
+    @State private var speechModel = SpeechModelChoice.current
     /// Keep mic warm stays on the page once picked, even Off where it would hide.
     @State private var keepsWarmRow = false
 
@@ -123,9 +125,13 @@ struct DictationSettingsPage: View {
             SettingsSectionHeader(title: "Formatting")
 
             SettingsCard {
-                // After the style, on every path (`DictationPipeline`).
+                // After the style, on every path (`DictationPipeline`). Casual lowercases sentence
+                // starts by itself, which read as this switch not working (TestFlight build 149).
                 SettingsToggleRow(
                     title: String(localized: "Lowercase"),
+                    detail: dictation.style == .casual
+                        ? String(localized: "Casual starts sentences lowercase anyway. Pick Polished for capitals.")
+                        : nil,
                     isOn: toggleBinding(
                         { DictationLowercaseSettings().isEnabled },
                         { DictationLowercaseSettings().isEnabled = $0 }
@@ -235,48 +241,91 @@ struct DictationSettingsPage: View {
                         .padding(.top, 2)
                         .padding(.bottom, 14)
                 }
+
+                HexWordsRows(isOn: customVocabularyOn)
             }
 
             SettingsCard {
                 SettingsToggleRow(
                     title: String(localized: "Speech model in keyboard"),
                     detail: keyboardParakeetFits
-                        ? String(localized: "For English. Uses about \(KeyboardParakeetDownload.size), downloaded on Wi-Fi. Until then, the keyboard uses Apple's speech recognition.")
+                        ? String(localized: "Until it's ready, the keyboard uses Apple's speech recognition")
                         : String(localized: "Needs an iPhone with 6 GB of memory or more"),
                     isOn: $keyboardParakeet
                 )
                 .disabled(!keyboardParakeetFits)
 
+                // Where the iPhone has the memory for either model (the switch above says why not).
+                if keyboardParakeetFits {
+                    SettingsDivider()
+
+                    SpeechModelChoiceRow(choice: speechModel) { choice in
+                        choice.select()
+                        withAnimation(HexMotion.settleAnimation(reduceMotion: reduceMotion)) {
+                            speechModel = SpeechModelChoice.current
+                        }
+                    }
+
+                    if speechModel == .multilingual {
+                        MultilingualModelStatus(
+                            download: dictation.multilingualDownload,
+                            retry: { dictation.retryMultilingualParakeet() },
+                            turnOff: { SpeechModelChoice.english.select(); speechModel = .english },
+                            useMobileData: { dictation.useMobileDataForMultilingualParakeet() }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                    }
+                }
+
                 if keyboardParakeet {
-                    KeyboardParakeetStatus(download: KeyboardParakeetDownload.shared)
+                    KeyboardParakeetStatus(
+                        download: KeyboardParakeetDownload.shared,
+                        multilingual: speechModel == .multilingual,
+                        offersMobileData: true
+                    )
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
                 }
+            }
+            .id(Self.speechModelRow)
 
+            // Keep mic warm and the microphone itself, apart from the speech model.
+            SettingsSectionHeader(title: "Microphone")
+
+            SettingsCard {
                 // Hidden where the keyboard dictates by itself and it would say Off.
                 if keepsWarmRow || dictation.showsKeepMicWarm {
-                    SettingsDivider()
-
-                    HStack(spacing: 12) {
-                        SettingsRowLabel(title: String(localized: "Keep mic warm"))
-                        Spacer(minLength: 8)
-                        SettingsSegments(
-                            items: WarmSessionDuration.allCases,
-                            selected: dictation.warmDuration,
-                            label: \.shortLabel,
-                            onSelect: { duration in
-                                keepsWarmRow = true
-                                withAnimation(HexMotion.settleAnimation(reduceMotion: reduceMotion)) {
-                                    dictation.selectWarmDuration(duration)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 12) {
+                            SettingsRowLabel(title: String(localized: "Keep mic warm"))
+                            Spacer(minLength: 8)
+                            SettingsSegments(
+                                items: WarmSessionDuration.allCases,
+                                selected: dictation.warmDuration,
+                                label: \.shortLabel,
+                                onSelect: { duration in
+                                    keepsWarmRow = true
+                                    withAnimation(HexMotion.settleAnimation(reduceMotion: reduceMotion)) {
+                                        dictation.selectWarmDuration(duration)
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
+                        // A privacy point too: the microphone stays open for the time picked.
+                        // Under the row, full width: beside the four segments it wrapped to three
+                        // lines.
+                        Text("Keeps the mic open after a dictation so the next starts at once")
+                            .font(.system(size: 12))
+                            .foregroundStyle(HexTheme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                     .frame(minHeight: 50)
-                }
 
-                SettingsDivider()
+                    SettingsDivider()
+                }
 
                 // With a car, headset or headphones connected (`MicrophoneRoute`).
                 HStack(spacing: 12) {
@@ -305,7 +354,6 @@ struct DictationSettingsPage: View {
                 .padding(.vertical, 10)
                 .frame(minHeight: 50)
             }
-            .id(Self.speechModelRow)
         }
         .animation(HexMotion.settleAnimation(reduceMotion: reduceMotion), value: customVocabularyOn)
         .animation(HexMotion.settleAnimation(reduceMotion: reduceMotion), value: showsStyleFormatting)
@@ -316,6 +364,7 @@ struct DictationSettingsPage: View {
         }
         .onAppear {
             keyboardParakeet = KeyboardParakeetSettings().isOn
+            speechModel = SpeechModelChoice.current
             revision += 1
         }
     }

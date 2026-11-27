@@ -548,8 +548,7 @@ final class AutocorrectEngine {
             || (language == .greek && (written == ";" || written == "\u{037E}"))
     }
 
-    /// Common sentence-initial words per language (Hex's own short lists), lowercase except
-    /// words that always take a capital.
+    /// Common sentence starters per language (Hex's own short lists), capitalised only if always.
     static func sentenceStarters(_ language: KeyboardLanguage) -> [String] {
         switch language {
         case .english: ["I", "the", "I'm"]
@@ -559,10 +558,11 @@ final class AutocorrectEngine {
         case .italian: ["io", "il", "la"]
         case .portuguese: ["eu", "o", "a"]
         case .polish: ["ja", "to", "nie"]
-        case .czech: ["to", "já", "ale"]
+        case .czech, .slovak: language == .czech ? ["to", "já", "ale"] : ["to", "ja", "ale"]
         case .hungarian: ["ez", "én", "a"]
+        case .dutch: ["ik", "het", "de"]
         case .romanian: ["eu", "nu", "am"]
-        case .norwegian: ["jeg", "det", "vi"]
+        case .norwegian, .swedish: language == .norwegian ? ["jeg", "det", "vi"] : ["jag", "det", "vi"]
         case .russian: ["я", "это", "мы"]
         case .ukrainian: ["я", "це", "ми"]
         case .greek: ["θα", "δεν", "το"]
@@ -584,10 +584,11 @@ final class AutocorrectEngine {
         case .italian: ["e", "ma", "che"]
         case .portuguese: ["e", "mas", "que"]
         case .polish: ["a", "ale", "że"]
-        case .czech: ["a", "ale", "že"]
+        case .czech, .slovak: ["a", "ale", "že"]
         case .hungarian: ["és", "de", "hogy"]
+        case .dutch: ["en", "maar", "dat"]
         case .romanian: ["și", "dar", "că"]
-        case .norwegian: ["og", "men", "jeg"]
+        case .norwegian, .swedish: language == .norwegian ? ["og", "men", "jeg"] : ["och", "men", "jag"]
         case .russian: ["и", "но", "что"]
         case .ukrainian: ["і", "але", "що"]
         case .greek: ["και", "αλλά", "που"]
@@ -606,10 +607,11 @@ final class AutocorrectEngine {
         case .italian: ["di", "e", "che", "la", "il", "a"]
         case .portuguese: ["de", "que", "e", "o", "a", "do"]
         case .polish: ["nie", "i", "w", "się", "na", "to"]
-        case .czech: ["a", "se", "je", "v", "na", "to"]
+        case .czech, .slovak: ["a", language == .czech ? "se" : "sa", "je", "v", "na", "to"]
         case .hungarian: ["a", "az", "és", "hogy", "nem", "egy"]
+        case .dutch: ["de", "en", "het", "van", "een", "ik"]
         case .romanian: ["de", "și", "în", "nu", "să", "la"]
-        case .norwegian: ["og", "i", "det", "er", "på", "som"]
+        case .norwegian, .swedish: language == .norwegian ? ["og", "i", "det", "er", "på", "som"] : ["och", "i", "att", "det", "som", "en"]
         case .russian: ["и", "в", "не", "на", "я", "что"]
         case .ukrainian: ["і", "в", "не", "на", "що", "я"]
         case .greek: ["και", "να", "το", "θα", "δεν", "η"]
@@ -770,14 +772,14 @@ final class AutocorrectEngine {
         if pool.count < end, token.count <= 3, let model, model.language == language.rawValue {
             let previous = Self.previousWord(beforeInput ?? "", token: token)
             predictions = model.completions(of: lower, after: previous, allowing: { mayOffer($0, after: previous) })
-                .map { Self.matchCase(of: token, onto: $0) }
+                .map { Self.matchCase(of: token, onto: stripSpelling(of: $0)) }
             if autoFix == nil, let first = predictions.first(where: { !has($0) }) { pool.append(first) }
         }
 
         // Spatial autocorrect's other readings of your taps.
         if corrects, let decision = decoderDecision(for: token) {
             for reading in decision.readings where pool.count < end && mayOffer(reading.text, replacing: token) {
-                let text = cased(reading.text, typed: token)
+                let text = cased(stripSpelling(of: reading.text), typed: token)
                 if !has(text) {
                     pool.append(text)
                 }
@@ -1088,12 +1090,12 @@ final class AutocorrectEngine {
                 if language.usesEnglishFixes, cased.contains(" ") {
                     cased = cased.split(separator: " ").map { $0 == "i" ? "I" : String($0) }.joined(separator: " ")
                 }
-                // German spells every noun with a capital, and the German model is lowercase
-                // throughout like the English one: a corrected word the dictionary knows only
-                // capitalised, or `de.capitals` calls a noun, takes its capital ("hsus" -> "haus"
-                // -> "Haus"), as the no-replacement path does below. One word only: a split
-                // reading keeps its second word as read.
-                if addsCapitals, !cased.contains(" "), decoder?.model.language == KeyboardLanguage.german.rawValue {
+                // The German and English models are lowercase throughout: a corrected word the
+                // dictionary knows only capitalised ("mray" -> "Mary"), `de.capitals` calls a noun
+                // ("hsus" -> "Haus") or the model spells its own way ("chatgtp" -> "ChatGPT") takes
+                // it, as the no-replacement path does below. One word only: a split reading keeps
+                // its second word as read.
+                if addsCapitals, !cased.contains(" "), language == .german || language == .english {
                     cased = nounCapitalised(for: cased, typed: token) ?? cased
                 }
                 return withoutAddedCapitals(cased, typed: token)
@@ -1257,7 +1259,7 @@ final class AutocorrectEngine {
         guard language == .german, let capitals = germanNouns,
               let capitalise = capitals.capitalises(word, after: Self.previousWord(beforeInput ?? "", token: token)),
               capitalise, let first = word.first
-        else { return properNoun(for: word) }
+        else { return modelSpelling(of: word) ?? properNoun(for: word) }
         return first.uppercased() + word.dropFirst()
     }
 

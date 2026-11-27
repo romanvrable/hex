@@ -38,10 +38,9 @@ mod stop_phrase;
 use capture_actions::{control_dictation, handle_hotkey_action, paste_last};
 use context_watch::ContextWatch;
 use events::handle_dictation_event;
-use guards::{
-    Release, WarmRelease, caps_lock_can_press, capture_boundary, capture_owns_dictation,
-    capture_refusal, paste_last_refusal,
-};
+#[cfg(hex_capture)]
+use guards::paste_picker_paused;
+use guards::{Release, WarmRelease, capture_boundary, capture_refusal, paste_last_refusal};
 use hotkeys::{Hotkeys, Shortcut};
 use output::{finish_dictation, finish_dictation_with, interrupted_dictation};
 
@@ -765,22 +764,9 @@ pub fn listen(
         // while a shortcut is recorded or a programmatic dictation owns the
         // microphone.
         while let Some(at) = caps_lock.try_recv_press() {
+            // An Annotate capture recording never holds a press back: the
+            // capture keeps recording beside the dictation.
             if hotkey_capture_suspended || programmatic.is_some() {
-                continue;
-            }
-            let caps_recording = hotkeys.caps_lock.is_recording();
-            #[cfg(hex_capture)]
-            let annotate_recording = capture_host
-                .as_mut()
-                .is_some_and(|host| host.recording_since(&input).is_some());
-            #[cfg(not(hex_capture))]
-            let annotate_recording = false;
-            // Labs › Dictate while annotating leaves dictation working while
-            // a capture records, so a Caps Lock press may start there too.
-            if !caps_lock_can_press(
-                caps_recording,
-                capture_owns_dictation(annotate_recording, crate::labs::dictate_while_annotating()),
-            ) {
                 continue;
             }
             let Some(action) = hotkeys.caps_lock_press() else {
@@ -806,6 +792,42 @@ pub fn listen(
             )?;
             if !accepted {
                 hotkeys.suspend(Shortcut::CapsLock);
+            }
+        }
+        // Labs › Middle mouse dictation: the tap times the middle button, and
+        // a press held half a second toggles hands-free dictation here, at
+        // the moment it became long, under the same rules as Caps Lock.
+        let middle_mouse_on = crate::labs::middle_mouse_dictation();
+        if !middle_mouse_on {
+            crate::middle_mouse_dictation::reset();
+        } else if crate::middle_mouse_dictation::take_long_press(
+            CaptureInstant::now(),
+            crate::suppression::middle_button_down,
+        ) && !hotkey_capture_suspended
+            && programmatic.is_none()
+            && let Some((shortcut, action)) = hotkeys.middle_mouse_press()
+        {
+            tracing::info!(action = ?action, "middle mouse long press");
+            let (raw, print) = if action == HotkeyAction::Start {
+                (false, None)
+            } else {
+                hotkeys.resolve_action(shortcut, action)
+            };
+            let accepted = handle_hotkey_action(
+                action,
+                raw,
+                print,
+                CaptureInstant::now(),
+                &input,
+                &dictation_worker,
+                &mut context,
+                &input.device_name(),
+                &mut events,
+                indicator,
+                &mut release,
+            )?;
+            if !accepted {
+                hotkeys.suspend(shortcut);
             }
         }
         // The capture shortcut ignores keys while shortcuts are suspended or
@@ -871,21 +893,9 @@ pub fn listen(
             {
                 continue;
             }
-            // Annotate records the narration itself: while it records, the
-            // dictation shortcut starts nothing. The tap still swallows its
-            // chord, so it never reaches the app. Labs › Dictate while
-            // annotating leaves it working as usual instead.
-            #[cfg(hex_capture)]
-            if capture_owns_dictation(
-                !hotkeys.any_recording()
-                    && capture_host
-                        .as_mut()
-                        .is_some_and(|host| host.recording_since(&input).is_some()),
-                crate::labs::dictate_while_annotating(),
-            ) {
-                hotkeys.track_key_state(input_event, capture_at);
-                continue;
-            }
+            // An Annotate capture never takes the dictation shortcut: it
+            // dictates as usual while the capture records, the capture's own
+            // narration hearing the same microphone timeline.
             for (shortcut, action) in hotkeys.process(input_event, capture_at) {
                 let (raw, print) = hotkeys.resolve_action(shortcut, action);
                 // Only a physical edge from the owner of a shortcut recording.
@@ -967,10 +977,11 @@ pub fn listen(
         #[cfg(hex_capture)]
         if let Some(picker) = paste_lab.picker()
             && let Err(error) = picker.tick(
-                hotkey_capture_suspended
-                    || programmatic.is_some()
-                    || hotkeys.any_recording()
-                    || capture_was_recording,
+                paste_picker_paused(
+                    hotkey_capture_suspended,
+                    programmatic.is_some(),
+                    hotkeys.any_recording(),
+                ),
                 &dictation_worker,
             )
         {
@@ -1748,19 +1759,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn caps_lock_does_not_start_over_an_annotate_recording() {
-        assert!(
-            !caps_lock_can_press(false, true),
-            "a Caps Lock start waits while Annotate records"
-        );
-        assert!(caps_lock_can_press(false, false));
-        assert!(
-            caps_lock_can_press(true, true),
-            "a Caps Lock capture still finishes while Annotate records"
-        );
-    }
-
     /// A released microphone's press takes wall-clock time; while it is being
     /// opened again a press keeps that, so it never anchors to the closed
     /// timeline's zero instant.
@@ -1827,6 +1825,123 @@ mod tests {
         assert!(!hotkeys.stop_caps_lock(), "nothing is left to cancel");
     }
 
+    /// Labs › Middle mouse dictation: a long press locks the dictation
+    /// machine, so the dictation shortcut's next press finishes it.
+    #[test]
+    fn a_middle_mouse_capture_finishes_with_the_dictation_shortcut() {
+        let base = CaptureInstant::from_nanos(95_000_000_000);
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut hotkeys = caps_lock_hotkeys(base, option_binding());
+        assert_eq!(
+            hotkeys.middle_mouse_press(),
+            Some((Shortcut::Dictation, HotkeyAction::Start))
+        );
+        assert!(hotkeys.dictation.is_locked());
+        assert_eq!(
+            hotkeys.process(InputEvent::Flags(OPTION_KEY_MASK), at(1_000)),
+            [(Shortcut::Dictation, HotkeyAction::Finish)]
+        );
+        let (raw, _) = hotkeys.resolve_action(Shortcut::Dictation, HotkeyAction::Finish);
+        assert!(!raw);
+        assert!(!hotkeys.any_recording());
+    }
+
+    /// And the reverse: a long press finishes the hands-free capture another
+    /// input locked, as that machine's own press would, keeping its output.
+    #[test]
+    fn a_middle_mouse_press_finishes_a_hands_free_capture_it_did_not_start() {
+        let base = CaptureInstant::from_nanos(96_000_000_000);
+        let mut hotkeys = caps_lock_hotkeys(base, option_binding());
+        hotkeys.raw = Some(DictationHotkey::new(base, false, option_binding()));
+        assert!(hotkeys.raw.as_mut().is_some_and(DictationHotkey::lock));
+        hotkeys.begin_capture(Shortcut::Raw, true);
+        assert_eq!(
+            hotkeys.middle_mouse_press(),
+            Some((Shortcut::Raw, HotkeyAction::Finish))
+        );
+        let (raw, _) = hotkeys.resolve_action(Shortcut::Raw, HotkeyAction::Finish);
+        assert!(raw, "the capture keeps Dictate without processing's output");
+        assert!(!hotkeys.any_recording());
+    }
+
+    /// A long press never takes over the dictation shortcut's own pending
+    /// double tap.
+    #[test]
+    fn a_middle_mouse_press_leaves_a_pending_double_tap_alone() {
+        let base = CaptureInstant::from_nanos(99_000_000_000);
+        let space = RuntimeHotkey {
+            modifiers: HotkeyModifiers::option(),
+            key_code: Some(49),
+        };
+        let mut hotkeys = caps_lock_hotkeys(base, space);
+        hotkeys.dictation.set_double_tap_enabled(true);
+        hotkeys.dictation.set_double_tap_only(true);
+        let press = InputEvent::Key {
+            code: 49,
+            down: true,
+            flags: OPTION_KEY_MASK,
+        };
+        assert!(hotkeys.process(press, base).is_empty());
+        assert!(hotkeys.dictation.has_pending_gesture());
+        assert_eq!(hotkeys.middle_mouse_press(), None);
+        assert!(!hotkeys.dictation.is_locked());
+    }
+
+    /// A long press never disturbs a press still held.
+    #[test]
+    fn a_middle_mouse_press_leaves_a_held_capture_alone() {
+        let base = CaptureInstant::from_nanos(97_000_000_000);
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut hotkeys = caps_lock_hotkeys(base, option_binding());
+        assert_eq!(
+            hotkeys.process(InputEvent::Flags(OPTION_KEY_MASK), at(0)),
+            [(Shortcut::Dictation, HotkeyAction::Start)]
+        );
+        assert_eq!(hotkeys.middle_mouse_press(), None);
+        assert!(hotkeys.dictation.is_recording());
+        assert!(!hotkeys.dictation.is_locked());
+    }
+
+    /// With the lab on, Escape cancels a hands-free capture even in Hold
+    /// mode, and the tap keeps it from the app; off, Hold mode's lock has no
+    /// cancel, as before.
+    #[test]
+    fn escape_cancels_a_hands_free_capture_only_with_middle_mouse_dictation() {
+        let base = CaptureInstant::from_nanos(98_000_000_000);
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let escape = InputEvent::Key {
+            code: 53,
+            down: true,
+            flags: 0,
+        };
+        let mut hotkeys = caps_lock_hotkeys(base, option_binding());
+        assert!(hotkeys.middle_mouse_press().is_some());
+        assert!(!hotkeys.takes_escape(at(500)));
+        assert!(hotkeys.process(escape, at(500)).is_empty());
+        assert!(
+            hotkeys
+                .process(
+                    InputEvent::Key {
+                        code: 53,
+                        down: false,
+                        flags: 0,
+                    },
+                    at(550),
+                )
+                .is_empty()
+        );
+        assert!(hotkeys.dictation.is_locked());
+
+        hotkeys.dictation.set_escape_cancels_lock(true);
+        assert!(hotkeys.takes_escape(at(600)));
+        assert_eq!(
+            hotkeys.process(escape, at(600)),
+            [(Shortcut::Dictation, HotkeyAction::CancelShortcut)]
+        );
+        assert!(!hotkeys.any_recording());
+        assert!(!hotkeys.takes_escape(at(700)));
+    }
+
     #[test]
     fn caps_lock_never_starts_over_a_pending_double_tap() {
         let base = CaptureInstant::from_nanos(100_000_000_000);
@@ -1870,6 +1985,19 @@ mod tests {
         assert_eq!(code(Some(FinishResult::Silent)), "discarded");
         assert_eq!(code(None), "discarded");
         assert_eq!(code(Some(FinishResult::Rejected("full".into()))), "failed");
+    }
+
+    /// Paste Last's picker stands down for a suspension, a programmatic
+    /// dictation, or a shortcut dictation, and for nothing else: an Annotate
+    /// capture or a meeting recording isn't even an input, so a tap or a hold
+    /// works over either and leaves it recording.
+    #[cfg(hex_capture)]
+    #[test]
+    fn the_paste_picker_works_over_annotate_and_meetings() {
+        assert!(!paste_picker_paused(false, false, false));
+        assert!(paste_picker_paused(true, false, false));
+        assert!(paste_picker_paused(false, true, false));
+        assert!(paste_picker_paused(false, false, true));
     }
 
     #[test]
@@ -1993,6 +2121,53 @@ mod tests {
             caps_lock.pattern_for_test(),
             LedPattern::Off,
             "a silent chunk turns nothing off"
+        );
+    }
+
+    /// A refused Paste Last explains itself in the HUD, as a refused
+    /// dictation paste does; another Paste Last failure only keeps its tone.
+    #[test]
+    fn a_refused_paste_last_reaches_the_hud_notice() {
+        let caps_lock = crate::caps_lock_dictation::CapsLockDictation::for_test();
+        let (hud, notices) = crate::dictation::indicator::channel();
+        let path = std::env::temp_dir().join(format!(
+            "hex-paste-last-refusal-{}-{}.ndjson",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut events = EventLog::create(&path).unwrap();
+        let refused = crate::paste::POST_EVENT_REFUSED.to_owned();
+        handle_dictation_event(
+            crate::parakeet::WorkerEvent::Pasted {
+                kind: crate::parakeet::PasteKind::LastTranscript,
+                result: Err(refused.clone()),
+            },
+            &mut events,
+            DictationSink {
+                hud: Some(&hud),
+                caps_lock: &caps_lock,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            notices.try_recv(),
+            Ok(DictationIndicatorEvent::Failed { message: Some(message) }) if message == refused
+        ));
+        handle_dictation_event(
+            crate::parakeet::WorkerEvent::Pasted {
+                kind: crate::parakeet::PasteKind::LastTranscript,
+                result: Err("nothing to paste".into()),
+            },
+            &mut events,
+            DictationSink {
+                hud: Some(&hud),
+                caps_lock: &caps_lock,
+            },
+        )
+        .unwrap();
+        assert!(
+            notices.try_recv().is_err(),
+            "another Paste Last failure keeps the tone only"
         );
     }
 

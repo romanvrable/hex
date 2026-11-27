@@ -382,6 +382,7 @@ pub(super) fn cancel(ui: &mut Ui) {
 /// its default language, which Settings then names.
 pub(super) fn choose(ui: &mut Ui, model: &ModelDefinition) {
     ui.picker.clear_deletion();
+    ui.found.error = None;
     let current = &ui.settings.transcription;
     // A file that is here but not checked is not active yet: choosing it
     // sends it through the model preparation, which verifies and adopts it.
@@ -585,9 +586,12 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> [El; 2] {
     // The comparison fits; the list scrolls inside the window's height.
     panel = match view {
         View::Compare => panel.child(content),
-        View::All => panel
-            .h(PANEL_HEIGHT)
-            .child(super::scroll_body(p.k, "model-scroll", content)),
+        View::All => panel.h(PANEL_HEIGHT).child(super::faded_body(
+            p.k,
+            "model-scroll",
+            content,
+            super::SHEET_FADE,
+        )),
     };
     modal_sheet(p, "picker", panel, close)
 }

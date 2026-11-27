@@ -1,6 +1,6 @@
-//! The `capture` experiment (macOS, Linux, and Windows): Scrawl's capture
-//! engine, the `scrawl-capture` crate, hosted inside Hex. Step 3 of
-//! `docs/plans/capture-in-hex.md`. Everything here is shared; what differs
+//! Annotate (macOS, Linux, and Windows): Scrawl's capture engine, the
+//! `scrawl-capture` crate, hosted inside Hex (`docs/features/capture.md`,
+//! `docs/hex-annotation.md`). Everything here is shared; what differs
 //! by OS is the engine's own platform adapter (ScreenCaptureKit; the portal,
 //! PipeWire and VA-API; or Windows.Graphics.Capture), where the audio
 //! timeline comes from (`DictationAudio` on macOS, the Linux and Windows
@@ -98,10 +98,10 @@ pub use drawing::{KeyUp, annotate_key_down, annotate_key_up, drawing, exit_drawi
 use outcomes::Feed;
 #[cfg(target_os = "macos")]
 pub use outcomes::snapshot;
+use outcomes::{CaptureEnd, LIVE_OUTCOMES, Outcomes, SharedOutcomes, lock};
 pub use outcomes::{CaptureSnapshot, SettledCapture, watch};
 #[cfg(test)]
 pub use outcomes::{FinishingCapture, RecordingCapture};
-use outcomes::{LIVE_OUTCOMES, Outcomes, SharedOutcomes, lock};
 
 #[cfg(target_os = "macos")]
 pub use own_windows::DIM_WINDOWS;
@@ -673,6 +673,12 @@ impl ConfigSource for HexConfig {
 
 fn hex_engine_config() -> EngineConfig {
     let mut config = EngineConfig::default();
+    config.captures_dir = Some(
+        crate::app_settings::capture_settings()
+            .captures_dir()
+            .to_string_lossy()
+            .into_owned(),
+    );
     config.autocrop = Some(serde_json::Value::Bool(true));
     config
         .experiments
@@ -795,8 +801,8 @@ fn corrected_words(words: Vec<TimedWord>, lag: Option<&WordLag>) -> Vec<WordTimi
         .collect()
 }
 
-/// Creates `dir` and missing parents owner-only, and makes `dir` itself
-/// owner-only if it already existed.
+/// Creates missing directories owner-only. Never chmod an existing custom
+/// location (it may be a shared folder, or the user's home directory).
 /// On Windows the folder inherits the profile's ACL, which is the user's.
 fn private_dirs(dir: &Path) -> Result<()> {
     let mut builder = DirBuilder::new();
@@ -806,36 +812,31 @@ fn private_dirs(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .wrap_err_with(|| format!("could not create {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .wrap_err_with(|| format!("could not restrict {}", dir.display()))?;
-    }
     Ok(())
 }
 
-/// A fresh owner-only `<captures>/<unix ms>.scrawl` folder; never adopts one
+/// A fresh owner-only annotation package; never adopts one
 /// that exists. Stamps never repeat within the process: a discarded capture's
 /// folder is removed on its collector's thread, so a switch in the same
 /// millisecond could otherwise reuse its path while it is still unfinished.
 fn new_bundle_dir(captures_dir: &Path) -> Result<PathBuf> {
-    static LAST_STAMP: Mutex<u128> = Mutex::new(0);
+    color_eyre::eyre::ensure!(
+        captures_dir.is_absolute(),
+        "No absolute annotations folder is available"
+    );
     private_dirs(captures_dir)?;
-    let now = std::time::SystemTime::now()
+    let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let stamp = {
-        let mut last = LAST_STAMP.lock().unwrap_or_else(|error| error.into_inner());
-        *last = now.max(*last + 1);
-        *last
-    };
-    for attempt in 0..100 {
-        let name = match attempt {
-            0 => format!("{stamp}.scrawl"),
-            n => format!("{stamp}-{n}.scrawl"),
-        };
+    for _ in 0..100 {
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).map_err(|e| eyre!("Could not create annotation id: {e}"))?;
+        let name = format!(
+            "{stamp}-{:032x}.{}",
+            u128::from_be_bytes(random),
+            scrawl_capture::bundle::EXTENSION
+        );
         let dir = captures_dir.join(name);
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = DirBuilder::new();
@@ -1285,12 +1286,9 @@ impl CaptureHost {
                     let settings = crate::app_settings::capture_settings();
                     let captures = settings.captures_dir();
                     if captures.is_dir() {
-                        scrawl_capture::retention::run_pass(
+                        scrawl_capture::retention::clean_annotations(
                             &captures,
                             &settings.retention(),
-                            false,
-                            Duration::ZERO,
-                            false,
                             &Self::retention_trasher,
                         );
                     }
@@ -1602,12 +1600,13 @@ impl CaptureHost {
                         silent,
                     );
                 })
-                .inspect_err(|_| {
+                .inspect_err(|error| {
                     if let Some(microphone) = microphone.take() {
                         let _ = microphone.close(audio, now);
                     }
                     remove_bundle(&bundle);
-                    lock(&self.outcomes).settle(bundle.clone(), Stage::Failed, None);
+                    lock(&self.outcomes)
+                        .settle(bundle.clone(), CaptureEnd::Failed(format!("{error:#}")));
                 })?
         };
         tracing::info!(bundle = %bundle.display(), ?target, "capture started");
@@ -1822,10 +1821,6 @@ pub enum Tapped {
 /// The capture is recording and its engine took input: the tap reports.
 static TAP_RECORDING: AtomicBool = AtomicBool::new(false);
 
-/// Whether this process records a capture now, on every OS: set when the
-/// host takes its bundle and cleared when it stops or cancels. The
-/// dictation HUD reads it to keep clear of the capture capsule.
-static RECORDING: AtomicBool = AtomicBool::new(false);
 static TAP_INPUT: OnceLock<SyncSender<(CaptureInstant, Tapped)>> = OnceLock::new();
 static DROPPED_INPUT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1841,13 +1836,6 @@ pub fn tapped_while(f: impl FnOnce()) -> Vec<Tapped> {
     TEST_TAP.set(Some(Vec::new()));
     f();
     TEST_TAP.take().unwrap_or_default()
-}
-
-/// Whether a capture records now, on every OS. The dictation HUD reads it
-/// while a dictation shows, so a dictation during a capture sits at the
-/// bottom edge, clear of the capture capsule at the screen's top.
-pub fn recording() -> bool {
-    RECORDING.load(Ordering::Acquire)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -2003,7 +1991,6 @@ impl LiveInput {
         };
         set_ink(None);
         TAP_RECORDING.store(false, Ordering::Release);
-        RECORDING.store(bundle.is_some(), Ordering::Release);
         drawing::reset();
         let dropped = DROPPED_INPUT.swap(0, Ordering::Relaxed);
         if dropped > 0 {
@@ -2057,6 +2044,7 @@ impl LiveInput {
     /// rules (Hex's windows are this process's).
     fn forward(&self, received: Receiver<(CaptureInstant, Tapped)>) {
         let mut pill = CapsulePill::default();
+        let mut picker = drawing::Picker::default();
         for (at, tapped) in received {
             let mut state = self.state();
             let InputState::Attached(target) = &mut *state else {
@@ -2079,7 +2067,8 @@ impl LiveInput {
                 #[cfg(not(target_os = "macos"))]
                 Tapped::Key { .. } => continue,
             };
-            let Some(event) = target.rules.translate(t_ms, input).map(drawing::as_pen) else {
+            let event = target.rules.translate(t_ms, input);
+            let Some(event) = event.and_then(|e| picker.pen(e)) else {
                 continue;
             };
             // A press or scroll on the capsule's pill is Hex's; anywhere
@@ -2680,7 +2669,14 @@ fn finish_captures(
         match finished {
             Ok(written) if clip => {
                 tracing::info!(bundle = %bundle.display(), words = written.words, "recording finished");
-                lock(outcomes).settle(bundle.clone(), Stage::Done, Some(written));
+                lock(outcomes).settle(
+                    bundle.clone(),
+                    CaptureEnd::Written {
+                        audio: written,
+                        copy_error: None,
+                        route: None,
+                    },
+                );
                 if let Some(written) = CLIP_WRITTEN.get() {
                     written(bundle);
                 }
@@ -2699,13 +2695,13 @@ fn finish_captures(
                 if let Err(error) = paste_source::mark_ready(&bundle, crate::history::now_ms()) {
                     tracing::warn!(%error, "capture written without Paste Last provenance");
                 }
-                lock(outcomes).settle_with(
+                lock(outcomes).settle(
                     bundle.clone(),
-                    Stage::Done,
-                    Some(written),
-                    None,
-                    copy_error,
-                    route,
+                    CaptureEnd::Written {
+                        audio: written,
+                        copy_error,
+                        route,
+                    },
                 );
                 if let Some(look) = look {
                     let job = routing::Job::Written {
@@ -2718,8 +2714,9 @@ fn finish_captures(
                 }
             }
             Err(error) => {
-                tracing::error!(error = format!("{error:#}"), "capture failed");
-                lock(outcomes).settle(bundle, Stage::Failed, None);
+                let error = format!("{error:#}");
+                tracing::error!(error, "capture failed");
+                lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
             }
         }
     }
@@ -2762,6 +2759,10 @@ fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
         // crate's own reads TIS off the main thread. A capture replaces what
         // a dictation watch has in front of it, as another paste would.
         HandOff::Paste => {
+            // macOS 27.3 refuses to post ⌘V without its keystroke grant, so
+            // fail before the clipboard changes instead of after.
+            crate::paste::ensure_keystroke_access()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
             crate::paste::note_paste();
             scrawl_capture::handoff::paste_bundle_with(bundle, &|| {
                 crate::keyboard::post_command('v').map_err(|error| anyhow::anyhow!("{error:#}"))
@@ -2840,7 +2841,7 @@ pub(crate) fn with_linux_paster(
 /// Copies a written capture to the clipboard, as Scrawl does: its summary,
 /// ready to paste into an agent. The capsule says "Summary copied" only
 /// once this is `Ok`.
-fn copy_to_clipboard(bundle: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_to_clipboard(bundle: &Path) -> anyhow::Result<()> {
     if cfg!(test) {
         return Ok(());
     }
@@ -2891,7 +2892,7 @@ fn collect(
             tracing::error!(error, "could not start the capture");
             drop(chunks);
             remove_bundle(&bundle);
-            lock(outcomes).fail(bundle, error);
+            lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
             return;
         }
     };
@@ -2930,7 +2931,7 @@ fn collect(
                 timeline.discard();
                 capture.cancel();
                 remove_bundle(&bundle);
-                lock(outcomes).fail(bundle, error);
+                lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
                 return;
             }
         }
@@ -2983,7 +2984,7 @@ fn collect(
             capture.cancel();
         }
     }
-    lock(outcomes).settle(bundle, Stage::Cancelled, None);
+    lock(outcomes).settle(bundle, CaptureEnd::Cancelled);
 }
 
 /// `hex dev capture-replay`: runs a capture through [`CaptureHost`] on a
@@ -3719,7 +3720,7 @@ mod tests {
     }
 
     #[test]
-    fn controls_are_idempotent_and_stop_writes_a_scrawl_bundle() {
+    fn controls_are_idempotent_and_stop_writes_a_hex_annotation() {
         let dir = temp_dir("control");
         let audio = FakeTimeline::default();
         let engine = FakeEngine::new(Arc::new(FakeTranscriber));
@@ -3803,8 +3804,10 @@ mod tests {
                 .iter()
                 .all(|sample| *sample != 0)
         );
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(bundle.join("scrawl.json")).unwrap()).unwrap();
+        let package: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.join("annotation.json")).unwrap()).unwrap();
+        assert_eq!(package["formatVersion"], 1);
+        let manifest = &package["annotation"];
         let words = &manifest["transcript"]["words"];
         assert_eq!(manifest["transcript"]["text"], "hello there");
         assert_eq!(words[1]["text"], "there");
@@ -3919,6 +3922,82 @@ mod tests {
         assert!(audio.open.lock().unwrap().is_none(), "the sink is closed");
         host.shutdown(&audio);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_finisher_failure_reaches_the_capsule_with_its_reason() {
+        use crate::rune_ui::capture_capsule::{
+            feed::Follow,
+            flow::{Failure, Input},
+        };
+
+        struct FinishFails;
+        impl CaptureEngine for FinishFails {
+            fn start(&self, start: Start) -> anyhow::Result<Box<dyn Recording>> {
+                Ok(Box::new(FailOnFinish {
+                    dir: start.bundle_dir.unwrap(),
+                }))
+            }
+
+            fn phones(&self) -> anyhow::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+        }
+        struct FailOnFinish {
+            dir: PathBuf,
+        }
+        impl Recording for FailOnFinish {
+            fn cancel(self: Box<Self>) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+
+            fn stop(self: Box<Self>) -> Box<dyn Sealed> {
+                self
+            }
+        }
+        impl Sealed for FailOnFinish {
+            fn cancel(self: Box<Self>) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+
+            fn finish(self: Box<Self>, _audio: Option<RecordedAudio>) -> anyhow::Result<Written> {
+                anyhow::bail!("disk full while writing bundle")
+            }
+        }
+
+        let dir = temp_dir("finish-fails");
+        let audio = FakeTimeline::default();
+        let mut host = CaptureHost::with(Arc::new(FinishFails), Some(dir.clone())).unwrap();
+        let bundle = report(host.control(ScrawlCaptureAction::Start, &audio))
+            .bundle
+            .unwrap();
+        lock(&host.outcomes).progress(&bundle, Stage::Recording);
+        let mut follow = Follow::default();
+        assert_eq!(
+            follow.next(&lock(&host.outcomes).snapshot()),
+            [Input::Stage(Stage::Recording)]
+        );
+        assert!(report(host.control(ScrawlCaptureAction::Stop, &audio)).changed);
+        let last = wait_for_last(&mut host, &audio, &bundle, true);
+        assert_eq!(last.stage, "failed");
+
+        let snapshot = lock(&host.outcomes).snapshot();
+        let settled = snapshot.last.as_ref().unwrap();
+        assert_eq!(settled.bundle, bundle);
+        assert_eq!(settled.stage, Stage::Failed);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("disk full while writing bundle")
+        );
+        assert_eq!(
+            follow.next(&snapshot),
+            [Input::Failed(
+                Failure::Save,
+                Some("disk full while writing bundle".into()),
+            )]
+        );
+        host.shutdown(&audio);
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -4993,7 +5072,19 @@ mod tests {
             cycle: false,
             search: false,
         });
+        let dir = temp_dir("grab-activity");
+        let audio = FakeTimeline::default();
+        let mut host = CaptureHost::with(
+            FakeEngine::new(Arc::new(FakeTranscriber)),
+            Some(dir.clone()),
+        )
+        .unwrap();
         assert!(suggesting() && !wants_escape() && !list_open());
+        assert_eq!(
+            host.shortcut_activity(CaptureInstant::now(), &audio),
+            ShortcutActivity::Capsule,
+            "compact/suggesting capsule claims the capture shortcut"
+        );
         assert!(!capsule_key(CapsuleKey::Escape));
         assert!(capsule_key(CapsuleKey::Press), "a press may fold them");
         assert!(capsule_key(CapsuleKey::Shift(true)), "Shift shows the rule");
@@ -5044,6 +5135,13 @@ mod tests {
         assert!(capsule_key(CapsuleKey::Press));
         // The search lets the capture shortcut through: it records anew.
         assert!(!capsule_key(CapsuleKey::Shortcut));
+        assert_eq!(
+            host.shortcut_activity(CaptureInstant::now(), &audio),
+            ShortcutActivity::Free,
+            "open search list lets the listener record anew"
+        );
+        host.shutdown(&audio);
+        fs::remove_dir_all(dir).ok();
         drop(second);
         assert!(!picking() && !list_open());
         assert!(!capsule_key(CapsuleKey::Escape));
@@ -5147,13 +5245,16 @@ mod tests {
         outcomes.progress(&two, Stage::Writing);
         outcomes.settle(
             one.clone(),
-            Stage::Done,
-            Some(Written {
-                words: 3,
-                gaps: 0,
-                audio_stopped_at_ms: None,
-                missing_transcript: None,
-            }),
+            CaptureEnd::Written {
+                audio: Written {
+                    words: 3,
+                    gaps: 0,
+                    audio_stopped_at_ms: None,
+                    missing_transcript: None,
+                },
+                copy_error: None,
+                route: None,
+            },
         );
         let done = watch.changed().unwrap();
         assert_eq!(
@@ -5190,11 +5291,35 @@ mod tests {
         assert_eq!(watch.changed(), None);
         assert_eq!(feed.snapshot(), done);
 
-        outcomes.settle(two.clone(), Stage::Cancelled, None);
+        outcomes.settle(two.clone(), CaptureEnd::Cancelled);
         let idle = watch.wait(Duration::from_secs(1)).unwrap();
         assert!(idle.recording.is_none() && idle.finishing.is_empty());
         assert_eq!(idle.last.unwrap().stage, Stage::Cancelled);
         assert!(outcomes.idle());
+
+        // Settling a discarded capture as Failed never replaces `last`.
+        let three = PathBuf::from("/c/three");
+        outcomes.start(three.clone(), since, TargetKind::Pointer, false);
+        outcomes.stopped(&three, End::Discard);
+        let before = watch.changed().unwrap();
+        assert_eq!(before.last.as_ref().unwrap().bundle, two);
+        outcomes.settle(three.clone(), CaptureEnd::Failed("late error".into()));
+        assert_eq!(watch.changed(), None);
+        assert!(outcomes.idle());
+        assert_eq!(feed.snapshot().last.as_ref().unwrap().bundle, two);
+
+        // Late progress after a Failed settle changes nothing.
+        let four = PathBuf::from("/c/four");
+        outcomes.start(four.clone(), since, TargetKind::Pointer, false);
+        outcomes.stopped(&four, End::Finish);
+        outcomes.settle(four.clone(), CaptureEnd::Failed("encoder exited".into()));
+        let failed = watch.changed().unwrap();
+        assert_eq!(
+            failed.last.as_ref().unwrap().error.as_deref(),
+            Some("encoder exited")
+        );
+        outcomes.progress(&four, Stage::Writing);
+        assert_eq!(watch.changed(), None);
 
         // A dropped watcher stops being woken.
         drop(watch);
@@ -5253,7 +5378,7 @@ mod tests {
                 word_lag(*model),
                 Some(lag),
                 "{} has a new pinned file: measure its word lag again \
-                 (docs/plans/capture-in-hex.md) before keeping the correction",
+                 (docs/features/capture.md) before keeping the correction",
                 model.as_str()
             );
         }

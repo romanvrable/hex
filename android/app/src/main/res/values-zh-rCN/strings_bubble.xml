@@ -78,7 +78,10 @@
     <string name="labs_recent_dictations_detail">在本机保留最近 50 条听写以便再次复制</string>
     <string name="recent_empty">暂无最近听写记录</string>
     <string name="recent_clear">清除记录</string>
-    <string name="dictation_replacements">词语替换</string>
-    <string name="dictation_replacements_detail">自动替换口述短语</string>
-    <string name="dictation_replacements_hint">口述短语 =&gt; 替换内容</string>
+    <string name="bubble_battery_title">夜间保持气泡就绪</string>
+    <string name="bubble_battery_detail">允许无限制电池用量，防止系统在夜间休眠时关闭无障碍服务</string>
+    <string name="bubble_battery_ready">无限制</string>
+    <string name="setup_next_bubble">开启悬浮气泡</string>
+    <string name="setup_next_battery">允许无限制电池用量</string>
+    <string name="bubble_allow">允许</string>
 </resources>

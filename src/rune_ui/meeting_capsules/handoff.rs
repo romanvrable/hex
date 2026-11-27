@@ -15,6 +15,41 @@ impl Capsule {
         }
     }
 
+    /// The ✕'s first step: ask before anything is lost.
+    pub(super) fn ask_discard(&mut self) {
+        if let State::Recording {
+            stopping: false,
+            confirming,
+            ..
+        } = &mut self.state
+        {
+            *confirming = true;
+        }
+    }
+
+    /// Keep: the question goes and the copies return.
+    pub(super) fn keep_recording(&mut self) {
+        if let State::Recording { confirming, .. } = &mut self.state {
+            *confirming = false;
+        }
+    }
+
+    /// Discard: the controller stops capture, skips the transcript, and
+    /// trashes the recording; its `Discarded` closes the pill.
+    pub(super) fn request_discard(&mut self) {
+        if matches!(
+            self.state,
+            State::Recording {
+                stopping: false,
+                confirming: true,
+                ..
+            }
+        ) && self.send(ControllerCommand::Discard)
+        {
+            self.mark_stopping();
+        }
+    }
+
     pub(super) fn mark_stopping(&mut self) {
         if let State::Recording { stopping, .. } = &mut self.state {
             *stopping = true;
@@ -24,6 +59,7 @@ impl Capsule {
     }
 
     pub(super) fn capture_stopped(&mut self) {
+        self.presentation.hold_hover = false;
         if let State::Recording {
             recording, hovered, ..
         } = &self.state
@@ -34,10 +70,10 @@ impl Capsule {
                 duration_ms,
                 hovered,
             };
+            // Windows: the finished panel is shorter than an open one, so
+            // its window shrinks only once the surface has landed on it.
             #[cfg(target_os = "windows")]
-            if let Some(resize) = &self.resize {
-                resize(panel::finalizing_window_size());
-            }
+            self.fit_recording_window();
         }
     }
 
@@ -50,10 +86,15 @@ impl Capsule {
         anchor: screen::Anchor,
         tx: &mut Tx,
     ) {
+        // Windows: the window this recording starts in was sized by the show
+        // that brought it (or is its offer's), not by the last recording.
+        #[cfg(target_os = "windows")]
+        self.recording_window.reset();
         self.state = State::Recording {
             recording,
             hovered: false,
             stopping: false,
+            confirming: false,
         };
         self.corner = anchor.corner;
         self.display = anchor.display;
@@ -67,13 +108,26 @@ impl Capsule {
     }
 
     pub(super) fn published(&mut self, manifest: Box<MeetingManifest>) {
+        self.presentation.hold_hover = false;
         self.live = Live::default();
         let hover = if self.hovered() {
             ReadyHover::Hovered
         } else {
             ReadyHover::Idle
         };
-        self.state = State::Ready { manifest, hover };
+        let mut stay = stay::Stay::new(READY_TIMEOUT);
+        if hover == ReadyHover::Hovered {
+            stay.pause();
+        }
+        self.state = State::Ready {
+            manifest,
+            hover,
+            stay,
+        };
+        // The ready panel is taller than the finalizing one, so this grows
+        // it here; a shrink would wait for the surface.
+        #[cfg(target_os = "windows")]
+        self.fit_recording_window();
     }
 }
 
@@ -125,16 +179,14 @@ impl MeetingCapsules {
         let handle = self.handle_for(id);
         let id = id.to_owned();
         handle.update_if(move |c, _| {
-            let State::Ready { manifest: m, .. } = &c.state else {
+            if !matches!(&c.state, State::Ready { manifest: m, .. } if m.id == id) {
                 return false;
-            };
-            #[cfg(target_os = "windows")]
-            if m.id == id
-                && let Some(resize) = &c.resize
-            {
-                resize(ready_window_size(m));
             }
-            m.id == id
+            // A summary arriving grows the panel here; a window only ever
+            // shrinks once the surface has landed.
+            #[cfg(target_os = "windows")]
+            c.fit_recording_window();
+            true
         });
     }
 

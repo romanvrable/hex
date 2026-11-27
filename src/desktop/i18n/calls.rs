@@ -1,5 +1,6 @@
 //! Meetings › Settings › Calls' strings in the languages whose tables live
-//! beside the main one: the answers a call gets and the Calls sheet.
+//! beside the main one: the answers a call gets, the Calls sheet, and the
+//! Meetings pane's and capsules' newer strings.
 //!
 //! Not yet reviewed by native speakers, like their neighbouring tables.
 
@@ -25,6 +26,20 @@ pub(super) const FRENCH: &[(&str, &str)] = &[
     ("Recording stops in {} s", "L'enregistrement s'arrête dans {} s"),
     ("Stop now", "Arrêter maintenant"),
     ("Couldn't record", "Impossible d'enregistrer"),
+    ("Discard recording?", "Supprimer l'enregistrement ?"),
+    ("Deletes its audio and transcript", "Supprime son audio et sa transcription"),
+    ("Discard recording", "Supprimer l'enregistrement"),
+    ("Open {} in Hex", "Ouvrir {} dans Hex"),
+    ("Open in Hex", "Ouvrir dans Hex"),
+    ("Record your calls", "Enregistrez vos appels"),
+    ("Local transcripts and notes for your calls.", "Des transcriptions et des notes locales pour vos appels."),
+    ("Turn on Meetings", "Activer Réunions"),
+    ("Meetings stay on this Mac.", "Les réunions restent sur ce Mac."),
+    ("Kept in Hex on this Mac for {}, then moved to the Trash. Exported Markdown stays.", "Conservées dans Hex sur ce Mac pendant {}, puis déplacées vers la Corbeille. Le Markdown exporté reste."),
+    ("Record a call to get its transcript and notes here.", "Enregistrez un appel pour obtenir ici sa transcription et ses notes."),
+    ("Hex can't hear the other participants", "Hex n'entend pas les autres participants"),
+    ("Only your microphone is recorded until Hex is allowed in Screen & System Audio Recording.", "Seul votre micro est enregistré tant que Hex n'est pas autorisé dans Enregistrement de l'écran et de l'audio du système."),
+    ("Rename…", "Renommer…"),
 ];
 
 #[rustfmt::skip]
@@ -49,6 +64,20 @@ pub(super) const PORTUGUESE: &[(&str, &str)] = &[
     ("Recording stops in {} s", "A gravação para em {} s"),
     ("Stop now", "Parar agora"),
     ("Couldn't record", "Não foi possível gravar"),
+    ("Discard recording?", "Descartar a gravação?"),
+    ("Deletes its audio and transcript", "Exclui o áudio e a transcrição"),
+    ("Discard recording", "Descartar gravação"),
+    ("Open {} in Hex", "Abrir {} no Hex"),
+    ("Open in Hex", "Abrir no Hex"),
+    ("Record your calls", "Grave suas chamadas"),
+    ("Local transcripts and notes for your calls.", "Transcrições e notas locais das suas chamadas."),
+    ("Turn on Meetings", "Ativar Reuniões"),
+    ("Meetings stay on this Mac.", "As reuniões ficam neste Mac."),
+    ("Kept in Hex on this Mac for {}, then moved to the Trash. Exported Markdown stays.", "Mantidas no Hex neste Mac por {} e depois movidas para a Lixeira. O Markdown exportado permanece."),
+    ("Record a call to get its transcript and notes here.", "Grave uma chamada para ver aqui a transcrição e as notas."),
+    ("Hex can't hear the other participants", "O Hex não ouve os outros participantes"),
+    ("Only your microphone is recorded until Hex is allowed in Screen & System Audio Recording.", "Só o seu microfone é gravado até o Hex ser permitido em Gravação de tela e áudio do sistema."),
+    ("Rename…", "Renomear…"),
 ];
 
 #[rustfmt::skip]
@@ -73,6 +102,20 @@ pub(super) const RUSSIAN: &[(&str, &str)] = &[
     ("Recording stops in {} s", "Запись остановится через {} с"),
     ("Stop now", "Остановить сейчас"),
     ("Couldn't record", "Не удалось записать"),
+    ("Discard recording?", "Удалить запись?"),
+    ("Deletes its audio and transcript", "Удаляет аудио и расшифровку"),
+    ("Discard recording", "Удалить запись"),
+    ("Open {} in Hex", "Открыть {} в Hex"),
+    ("Open in Hex", "Открыть в Hex"),
+    ("Record your calls", "Записывайте свои звонки"),
+    ("Local transcripts and notes for your calls.", "Локальные расшифровки и заметки ваших звонков."),
+    ("Turn on Meetings", "Включить Встречи"),
+    ("Meetings stay on this Mac.", "Встречи остаются на этом Mac."),
+    ("Kept in Hex on this Mac for {}, then moved to the Trash. Exported Markdown stays.", "Хранятся в Hex на этом Mac {}, затем перемещаются в Корзину. Экспортированный Markdown сохраняется."),
+    ("Record a call to get its transcript and notes here.", "Запишите звонок, чтобы увидеть здесь его расшифровку и заметки."),
+    ("Hex can't hear the other participants", "Hex не слышит других участников"),
+    ("Only your microphone is recorded until Hex is allowed in Screen & System Audio Recording.", "Записывается только ваш микрофон, пока Hex не разрешён в разделе «Запись экрана и системного звука»."),
+    ("Rename…", "Переименовать…"),
 ];
 
 /// Hungarian, for the strings above.
@@ -98,4 +141,18 @@ pub(super) const HUNGARIAN: &[(&str, &str)] = &[
     ("Recording stops in {} s", "A felvétel {} s múlva leáll"),
     ("Stop now", "Leállítás most"),
     ("Couldn't record", "Nem sikerült rögzíteni"),
+    ("Discard recording?", "Elveti a felvételt?"),
+    ("Deletes its audio and transcript", "Törli a hangot és az átiratot"),
+    ("Discard recording", "Felvétel elvetése"),
+    ("Open {} in Hex", "{} megnyitása a Hexben"),
+    ("Open in Hex", "Megnyitás a Hexben"),
+    ("Record your calls", "Rögzítse a hívásait"),
+    ("Local transcripts and notes for your calls.", "Helyi átiratok és jegyzetek a hívásairól."),
+    ("Turn on Meetings", "Megbeszélések bekapcsolása"),
+    ("Meetings stay on this Mac.", "A megbeszélések ezen a Macen maradnak."),
+    ("Kept in Hex on this Mac for {}, then moved to the Trash. Exported Markdown stays.", "A Hex ezen a Macen {} ideig őrzi meg, majd a Kukába helyezi. Az exportált Markdown megmarad."),
+    ("Record a call to get its transcript and notes here.", "Rögzítsen egy hívást, hogy itt lássa az átiratát és a jegyzeteit."),
+    ("Hex can't hear the other participants", "A Hex nem hallja a többi résztvevőt"),
+    ("Only your microphone is recorded until Hex is allowed in Screen & System Audio Recording.", "Amíg a Hex nincs engedélyezve a Képernyő- és rendszerhangfelvételben, csak a mikrofonja kerül rögzítésre."),
+    ("Rename…", "Átnevezés…"),
 ];

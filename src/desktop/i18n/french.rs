@@ -13,8 +13,15 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
     TABLE.get_or_init(|| merged(TRANSLATIONS, Language::French))
 }
 
+#[cfg(test)]
+pub(super) fn entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    super::screenshots::entries(TRANSLATIONS, Language::French)
+}
+
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("macOS isn't letting Hex paste. Add Hex in System Settings > Privacy & Security > System & App Protection Override, then restart Hex.", "macOS empêche Hex de coller. Ajoutez Hex dans Réglages Système > Confidentialité et sécurité > Dérogation à la protection du système et des apps, puis relancez Hex."),
+    ("Windows blocked Hex's paste. Your words are on the clipboard: press Ctrl+V. Security software or an app running as administrator can cause this.", "Windows a bloqué le collage de Hex. Vos mots sont dans le presse-papiers : appuyez sur Ctrl+V. Un logiciel de sécurité ou une app exécutée en tant qu'administrateur peut en être la cause."),
     ("Sent to", "Envoyé à"),
     ("Nothing here yet", "Rien ici pour l’instant"),
     ("Dictations, annotations, and captures show here.", "Les dictées, les annotations et les captures apparaissent ici."),
@@ -138,7 +145,6 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("The mic opens only while you dictate; the first moment can be clipped", "Le micro ne s'ouvre que pendant la dictée ; le tout début peut être coupé"),
     ("The mic stays ready so dictation starts instantly; your system shows it in use", "Le micro reste prêt pour que la dictée démarre aussitôt ; votre système l'indique comme utilisé"),
     ("Hex can't listen until the speech model has downloaded", "Hex ne peut pas écouter tant que le modèle vocal n'est pas téléchargé"),
-    ("Don't switch", "Ne pas changer"),
     ("Your desktop assigns this key itself, so Hex can't confirm it", "Votre bureau attribue cette touche lui-même, Hex ne peut donc pas la confirmer"),
     ("Not installed", "Non installé"),
     ("Switch model with keyboard language", "Changer de modèle avec la langue du clavier"),
@@ -208,30 +214,18 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Its file changed since it was imported. Check it again, import it again, or remove it.", "Son fichier a changé depuis l'importation. Vérifiez-le à nouveau, réimportez-le ou supprimez-le."),
     ("The imported model", "Le modèle importé"),
     ("{model} is missing, so Hex uses {fallback} until you import it again or choose another model", "{model} est introuvable, Hex utilise donc {fallback} jusqu'à ce que vous le réimportiez ou choisissiez un autre modèle"),
-    ("{model} changed since it was imported, so Hex uses {fallback} until you import it again or choose another model", "{model} a changé depuis l'importation, Hex utilise donc {fallback} jusqu'à ce que vous le réimportiez ou choisissiez un autre modèle"),
     ("Remove {}?", "Supprimer {} ?"),
     ("Import again…", "Réimporter…"),
     ("Choose a speech model", "Choisissez un modèle vocal"),
     ("Hex found speech models already on this computer.", "Hex a trouvé des modèles vocaux déjà présents sur cet ordinateur."),
-    ("Hex's recommended model", "Le modèle recommandé par Hex"),
-    ("Tested by Hex for quality and reliability", "Testé par Hex pour sa qualité et sa fiabilité"),
-    ("Already downloaded, no download needed", "Déjà téléchargé, aucun téléchargement nécessaire"),
-    ("Use a model already on this computer", "Utiliser un modèle déjà présent sur cet ordinateur"),
     ("Not tested by Hex", "Non testé par Hex"),
     ("Compatible doesn't mean accurate: a model that loads can still transcribe poorly.", "Compatible ne veut pas dire précis : un modèle qui se charge peut quand même mal transcrire."),
-    ("{revision} · {compression} · {source}", "{revision} · {compression} · {source}"),
     ("Found on this computer", "Trouvé sur cet ordinateur"),
     ("Model could not be used.", "Impossible d'utiliser le modèle."),
     ("It may be too big for this computer's GPU memory.", "Il est peut-être trop gros pour la mémoire GPU de cet ordinateur."),
     ("Forget", "Oublier"),
     ("Forget it?", "L'oublier ?"),
     ("Checking the model stopped.", "La vérification du modèle s'est arrêtée."),
-    ("Use the copy already on this computer", "Utiliser la copie déjà présente sur cet ordinateur"),
-    ("Download instead", "Télécharger plutôt"),
-    ("Download recommended model", "Télécharger le modèle recommandé"),
-    ("Already on this computer: {source}", "Déjà sur cet ordinateur : {source}"),
-    ("Known model", "Modèle connu"),
-    ("Not verified by Hex · Not benchmarked", "Non vérifié par Hex · Sans tests comparatifs"),
     ("Imported", "Importé"),
     ("Not benchmarked", "Sans tests comparatifs"),
     ("{} languages", "{} langues"),
@@ -376,9 +370,6 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Shortcuts", "Raccourcis"),
     ("Your desktop granted {}", "Votre bureau a accordé {}"),
     ("Your desktop did not grant this shortcut", "Votre bureau n'a pas accordé ce raccourci"),
-    ("Last dictation discarded: {}", "Dernière dictée ignorée : {}"),
-    ("too quiet, check your mic level", "trop faible, vérifiez le niveau du micro"),
-    ("no speech heard, check your mic level", "aucune parole entendue, vérifiez le niveau du micro"),
     ("GNOME keyboard shortcuts", "Raccourcis clavier GNOME"),
     ("Add GNOME keyboard shortcuts", "Ajouter des raccourcis clavier GNOME"),
     ("Adds dictation, paste last and Annotate to GNOME Settings › Keyboard › Custom Shortcuts with your shortcuts. GNOME runs them on the key press, so dictation toggles.", "Ajoute la dictée, le collage de la dernière dictée et Annotate dans Paramètres GNOME › Clavier › Raccourcis personnalisés avec vos raccourcis. GNOME les exécute à l'appui sur la touche, la dictée fonctionne donc en bascule."),
@@ -414,7 +405,6 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Recommended", "Recommandé"),
     ("Settings", "Réglages"),
     ("General", "Général"),
-    ("Experiments", "Expériences"),
     ("Voice Filter", "Filtre vocal"),
     ("Recordings", "Enregistrements"),
     ("Advanced", "Avancé"),
@@ -441,15 +431,17 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Add correction", "Ajouter une correction"),
     ("Vocabulary", "Vocabulaire"),
     ("Names and terms", "Noms et termes"),
-    ("Transcription and rewriting spell them right, and search finds them when misheard", "La transcription et la réécriture les orthographient correctement, et la recherche les trouve quand ils sont mal entendus"),
-    ("Terms with spaces match only when said in full", "Les termes avec des espaces ne correspondent que s'ils sont dits en entier"),
+    ("Names and words Hex should spell right. Phrases match only when said in full.", "Noms et mots que Hex doit écrire correctement. Les expressions ne correspondent que si elles sont dites en entier."),
+    ("Spell as", "Écrire comme"),
+    ("Misheard as", "Mal entendu comme"),
+    ("optional", "facultatif"),
+    ("e.g. cappuccino", "ex. : cappuccino"),
+    ("e.g. capuchin, cap a chino", "ex. : capuchin, cap a chino"),
     ("Light", "Léger"),
     ("Strong", "Fort"),
     ("Add term", "Ajouter un terme"),
     ("1 term", "1 terme"),
     ("{} terms", "{} termes"),
-    ("Term (e.g. cappuccino)", "Terme (ex. : cappuccino)"),
-    ("Sounds like (e.g. capuchin, cap a chino)", "Se prononce comme (ex. : capuchin, cap a chino)"),
     ("Up to 16 spellings per term are saved, and 64 characters per term or spelling.", "Jusqu'à 16 graphies par terme sont enregistrées, et 64 caractères par terme ou graphie."),
     ("Import…", "Importer…"),
     ("Export…", "Exporter…"),
@@ -502,7 +494,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Lowercase", "Minuscules"),
     ("Lowercases everything", "Met tout en minuscules"),
     ("No final period", "Sans point final"),
-    ("Drops the last . ! or ?", "Supprime le dernier . ! ou ?"),
+    ("Drops the final period, keeps ? and !", "Supprime le point final, garde ? et !"),
     ("SpongeBob case", "Style Bob l'éponge"),
     ("aLtErNaTeS every letter", "aLtErNe chaque lettre"),
     ("Copied. Paste it into your agent and say what you want", "Copié. Collez-le dans votre agent et dites ce que vous voulez"),
@@ -692,8 +684,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Export", "Exportation"),
     ("Follows Keep meetings unless you choose a shorter window", "Suit Conserver les réunions sauf si vous choisissez une durée plus courte"),
     ("Moves audio to the Trash and keeps transcripts and notes", "Déplace l'audio dans la corbeille et conserve transcriptions et notes"),
-    ("Moves audio, transcripts, and notes to the Trash", "Déplace l'audio, les transcriptions et les notes dans la corbeille"),
-    ("Moves new meetings' audio, transcripts, and notes to the Trash", "Déplace l'audio, les transcriptions et les notes des nouvelles réunions dans la corbeille"),
+    ("Moves meetings in Hex to the Trash; exported Markdown stays", "Déplace les réunions dans Hex vers la corbeille ; le Markdown exporté reste"),
+    ("Moves new meetings in Hex to the Trash; exported Markdown stays", "Déplace les nouvelles réunions dans Hex vers la corbeille ; le Markdown exporté reste"),
     ("Deleted after {}", "Supprimées après {}"),
     ("Remind me", "Me rappeler"),
     ("At start", "Au début"),
@@ -816,6 +808,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Context", "Contexte"),
     ("Current context", "Contexte actuel"),
     ("None", "Aucun"),
+    ("Don't switch", "Ne pas changer"),
     ("Keyboard", "Clavier"),
     ("Browser navigation", "Navigation dans le navigateur"),
     ("Application navigation", "Navigation dans l'application"),
@@ -1494,37 +1487,3 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Indicator on any display", "Indicateur sur n’importe quel écran"),
     ("Drag the meeting recording indicator to another display and it stays there", "Faites glisser l’indicateur d’enregistrement de réunion vers un autre écran : il y reste"),
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::TRANSLATIONS;
-
-    #[test]
-    fn every_interface_string_has_a_french_translation() {
-        let french = super::table();
-        let missing: Vec<&str> = super::super::all_translations()
-            .map(|(english, _)| *english)
-            .filter(|english| french.get(english).is_none_or(|text| text.is_empty()))
-            .collect();
-        assert!(missing.is_empty(), "no French for {missing:?}");
-    }
-
-    #[test]
-    fn french_keys_are_unique_and_keep_their_placeholders() {
-        let mut seen = std::collections::HashSet::new();
-        for (english, french) in TRANSLATIONS {
-            assert!(seen.insert(english), "duplicate key {english:?}");
-            let names = english
-                .split('{')
-                .skip(1)
-                .filter_map(|part| part.split_once('}'))
-                .map(|(name, _)| name);
-            for name in names {
-                assert!(
-                    french.contains(&format!("{{{name}}}")),
-                    "translation of {english:?} lost {{{name}}}: {french:?}"
-                );
-            }
-        }
-    }
-}

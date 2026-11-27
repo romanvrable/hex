@@ -17,13 +17,11 @@ use crate::capture_host::routing::rule_match::{display_site, shorten_home, site_
 use crate::capture_host::{RouteDest, jev_available, recent_sessions};
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::rune_ui::controls::{
-    ButtonKind, CardRow, Choice, METRICS, Paint, button, card, folder_label, icon_row, modal_sheet,
-    note, section_with, segmented, select, setting_row, toggle_row, value_button, value_font,
+    ButtonKind, CardRow, Choice, METRICS, ModalWidth, Paint, button, card, folder_label, icon_row,
+    modal_panel, modal_scroll_body, modal_sheet, note, section_with, segmented, select,
+    setting_row, toggle_row, value_button, value_font,
 };
 use crate::rune_ui::{Menu, Modal, Pane, Ui, icons};
-
-const MODAL_WIDTH: f32 = 560.0;
-const PADDING: f32 = 18.0;
 const ICON: f32 = 20.0;
 const STACKED: usize = 4;
 const STACK_ICON: f32 = 18.0;
@@ -179,12 +177,12 @@ fn eligible_apps(ui: &Ui) -> Vec<(String, String)> {
 
 /// Whether Jev auto-send is currently enabled in persisted settings.
 fn jev_auto_send_on(ui: &Ui) -> bool {
-    let config = ui.settings.capture.routing.config();
-    config.auto_send == AutoSend::Confident && config.jev_enabled()
+    ui.settings.capture.routing.config().jev_auto_send()
 }
 
 /// Toggles `Auto-send with Jev` between `Confident` (+ `jev_routing` +
-/// `smart_routing`) and `Rules`.
+/// `smart_routing`) and `Rules` (clearing `jev_routing`, so Jev is never
+/// asked; `smart_routing` stays, since it only weighs evidence locally).
 fn toggle_jev(ui: &mut Ui) {
     let enable = !jev_auto_send_on(ui);
     ui.update(|settings| {
@@ -195,6 +193,7 @@ fn toggle_jev(ui: &mut Ui) {
                 config.smart_routing = true;
             } else {
                 config.auto_send = AutoSend::Rules;
+                config.jev_routing = false;
             }
         });
     });
@@ -589,7 +588,7 @@ fn rule_row(ui: &Ui, p: Paint, index: usize, entry: &RuleEntry, menus: &mut Vec<
         .focusable(true)
         .h(26.0)
         .pl(8.0)
-        .pr(5.0)
+        .pr(4.0)
         .gap(6.0)
         .center_y()
         .radius(p.k.radius.sm)
@@ -1051,7 +1050,6 @@ fn editor_view(ui: &Ui, p: Paint, menus: &mut Vec<El>) -> Vec<El> {
 
 /// The sheet's scrim and panel via `modal_sheet`, plus any open dropdown menu.
 pub(crate) fn modal(ui: &Ui, p: Paint) -> Vec<El> {
-    let c = &p.k.c;
     let mut menus = Vec::new();
     let adding = ui.routing.adding;
     let (title, body) = if adding {
@@ -1060,11 +1058,8 @@ pub(crate) fn modal(ui: &Ui, p: Paint) -> Vec<El> {
         (tr("Auto-send rules"), rules_view(ui, p, &mut menus))
     };
     let footer = if adding {
-        row()
-            .key("footer")
-            .justify_end()
-            .gap(8.0)
-            .child(button(
+        vec![
+            button(
                 p,
                 "cancel-rule",
                 tr("Cancel"),
@@ -1074,19 +1069,18 @@ pub(crate) fn modal(ui: &Ui, p: Paint) -> Vec<El> {
                     ui.routing.error = None;
                     ui.open = None;
                 },
-            ))
-            .child(
-                button(
-                    p,
-                    "save-rule",
-                    tr("Save rule"),
-                    ButtonKind::Primary,
-                    |ui: &mut Ui, _| save_new_rule(ui),
-                )
-                .default_button(),
+            ),
+            button(
+                p,
+                "save-rule",
+                tr("Save rule"),
+                ButtonKind::Primary,
+                |ui: &mut Ui, _| save_new_rule(ui),
             )
+            .default_button(),
+        ]
     } else {
-        row().key("footer").justify_end().child(
+        vec![
             button(
                 p,
                 "close-routing",
@@ -1095,29 +1089,21 @@ pub(crate) fn modal(ui: &Ui, p: Paint) -> Vec<El> {
                 |ui: &mut Ui, _| close(ui),
             )
             .default_button(),
-        )
+        ]
     };
-    let panel = col()
-        .key("routing-sheet")
-        .role("dialog")
-        .label(title)
-        .w(MODAL_WIDTH)
-        .pt(PADDING)
-        .px(PADDING)
-        .pb(14.0)
-        .gap(16.0)
-        .radius(p.k.radius.xl)
-        .fill(c.bg_base)
-        .border(p.hair, c.border_weak)
-        .on_press(|_: &mut Ui| {})
-        .child(
-            text(title)
-                .key("title")
-                .font(p.k.ty.body_medium)
-                .color(p.text()),
-        )
-        .children(body)
-        .child(footer);
+    let body_key = if adding {
+        "routing-editor-body"
+    } else {
+        "routing-rules-body"
+    };
+    let panel = modal_panel(
+        p,
+        "routing-sheet",
+        title,
+        ModalWidth::Medium,
+        vec![modal_scroll_body(p, body_key, body)],
+        footer,
+    );
     let mut layers = Vec::from(modal_sheet(p, "routing", panel, close));
     layers.extend(menus);
     layers
@@ -1148,10 +1134,10 @@ mod tests {
         assert!(cfg.jev_routing && cfg.smart_routing);
 
         toggle_jev(&mut ui);
-        assert_eq!(
-            ui.settings.capture.routing.config().auto_send,
-            AutoSend::Rules
-        );
+        let cfg = ui.settings.capture.routing.config();
+        assert_eq!(cfg.auto_send, AutoSend::Rules);
+        assert!(!cfg.jev_routing, "Jev is turned off, not just auto-send");
+        assert!(cfg.smart_routing, "weighing evidence stays a local choice");
         assert!(!jev_auto_send_on(&ui));
     }
 
@@ -1251,5 +1237,180 @@ mod tests {
         assert!(ui.settings.capture.routing.config().terminals.is_empty());
         remove_rule(&mut ui, RuleKind::App, "anomaly.hex".into());
         assert!(ui.settings.capture.routing.config().apps.is_empty());
+    }
+
+    fn headless(ui: Ui, size: (f32, f32)) -> rune::Runtime<Ui> {
+        let env = rune::Env {
+            system_dark: true,
+            scale: 2.0,
+        };
+        let text =
+            rune::text::TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
+        let mut rt = crate::rune_ui::offscreen::runtime(ui, crate::rune_ui::view, size, env, text);
+        rt.poll = Some(crate::rune_ui::poll);
+        rt.on_key = Some(crate::rune_ui::on_key);
+        rt.settle_all();
+        rt.frame(0.0);
+        rt
+    }
+
+    fn settle_rt(rt: &mut rune::Runtime<Ui>) {
+        for _ in 0..90 {
+            rt.frame(1.0 / 30.0);
+        }
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    fn rect_of(rt: &rune::Runtime<Ui>, key: &str) -> [f32; 4] {
+        rt.presented(key)
+            .map(|(rect, _)| rect)
+            .or_else(|| {
+                rt.elements()
+                    .into_iter()
+                    .find(|e| e.key.as_deref() == Some(key) || e.path.ends_with(key))
+                    .map(|e| e.rect)
+            })
+            .unwrap_or_else(|| panic!("no element {key}"))
+    }
+
+    #[test]
+    fn routing_rules_modal_hugs_short_list_and_scrolls_long_list_in_compact_window() {
+        use crate::rune_ui::controls::MODAL;
+
+        // Short list (4 fixture rules) in a normal window hugs its content.
+        let mut short_ui = mac_fixture();
+        fixture(&mut short_ui, true, false);
+        let short_rt = headless(short_ui, (980.0, 860.0));
+        let short_dialog = rect_of(&short_rt, "routing-sheet");
+        assert!(
+            short_dialog[1] >= MODAL.margin - 0.5
+                && short_dialog[1] + short_dialog[3] <= 860.0 - MODAL.margin + 0.5,
+            "short dialog fits: {short_dialog:?}"
+        );
+        assert!(
+            short_dialog[3] < 860.0 - 2.0 * MODAL.margin - 100.0,
+            "short dialog hugs content instead of stretching: {short_dialog:?}"
+        );
+        let short_vp = rect_of(&short_rt, "routing-rules-body");
+        let short_content = rect_of(&short_rt, "routing-rules-body/body-content");
+        assert!(
+            short_content[3] <= short_vp[3] + 0.5,
+            "short dialog does not overflow: content {short_content:?} in {short_vp:?}"
+        );
+
+        // Long list (20 rules) in a compact window fits, pins title & footer,
+        // scrolls to the last rule, and anchors its destination menu in view.
+        let win_h = 620.0;
+        let mut long_ui = mac_fixture();
+        fixture(&mut long_ui, true, false);
+        long_ui.settings.capture.routing.update(|config| {
+            config.sites.clear();
+            config.terminals.clear();
+            config.apps.clear();
+            for i in 0..20 {
+                config
+                    .sites
+                    .insert(format!("site-{i:02}.example.com"), "ses_acme".into());
+            }
+        });
+        let mut rt = headless(long_ui, (980.0, win_h));
+        let dialog = rect_of(&rt, "routing-sheet");
+        assert!(
+            dialog[1] >= MODAL.margin - 0.5 && dialog[1] + dialog[3] <= win_h - MODAL.margin + 0.5,
+            "long dialog stays inside window margins: {dialog:?}"
+        );
+        let title_before = rect_of(&rt, "routing-sheet/title");
+        let done_before = rect_of(&rt, "close-routing");
+        assert!(
+            title_before[1] >= dialog[1] && title_before[1] + title_before[3] <= win_h,
+            "title stays visible: {title_before:?} in {dialog:?}"
+        );
+        assert!(
+            done_before[1] >= dialog[1] && done_before[1] + done_before[3] <= dialog[1] + dialog[3],
+            "Done button stays inside dialog: {done_before:?} in {dialog:?}"
+        );
+        let jev_card = rect_of(&rt, "jev-card");
+        let vp = rect_of(&rt, "routing-rules-body");
+        assert!(
+            jev_card[1] >= vp[1] && jev_card[1] + jev_card[3] <= vp[1] + vp[3],
+            "Auto-send with Jev card starts visible: {jev_card:?} in {vp:?}"
+        );
+        let content = rect_of(&rt, "routing-rules-body/body-content");
+        assert!(
+            content[3] > vp[3],
+            "20 rules overflow the body viewport so scrolling activates: {content:?} vs {vp:?}"
+        );
+        assert!(
+            vp[1] + vp[3] <= done_before[1],
+            "scroll viewport ends above Done button: {vp:?} vs {done_before:?}"
+        );
+
+        // Wheel scroll until the last rule sits cleanly inside the viewport.
+        let mut last = rect_of(&rt, "rule19");
+        assert!(
+            last[1] + last[3] > vp[1] + vp[3],
+            "rule19 starts below the viewport: {last:?} vs {vp:?}"
+        );
+        for _ in 0..200 {
+            if last[1] >= vp[1] && last[1] + last[3] <= vp[1] + vp[3] {
+                break;
+            }
+            rt.wheel(vp[0] + vp[2] / 2.0, vp[1] + vp[3] / 2.0, -30.0);
+            rt.frame(1.0 / 60.0);
+            last = rect_of(&rt, "rule19");
+        }
+        assert!(
+            last[1] >= vp[1] && last[1] + last[3] <= vp[1] + vp[3],
+            "scrolling reveals rule19 inside viewport: {last:?} in {vp:?}"
+        );
+        // Title and footer remained pinned at the exact same positions.
+        assert_eq!(rect_of(&rt, "routing-sheet/title"), title_before);
+        assert_eq!(rect_of(&rt, "close-routing"), done_before);
+
+        // Open rule19's destination dropdown after scrolling and verify the
+        // menu anchors in view and updates the rule.
+        let trigger = rect_of(&rt, "rule19-to");
+        assert!(
+            trigger[1] >= vp[1] && trigger[1] + trigger[3] <= vp[1] + vp[3],
+            "rule19 trigger is visible: {trigger:?} in {vp:?}"
+        );
+        let (tx, ty) = (trigger[0] + trigger[2] / 2.0, trigger[1] + trigger[3] / 2.0);
+        rt.pointer_down(tx, ty);
+        rt.pointer_up(tx, ty);
+        settle_rt(&mut rt);
+        assert_eq!(rt.state.open, Some(Menu::RoutingRule(19)));
+        let menu_content = rect_of(&rt, "rule19-to-menu");
+        assert!(
+            menu_content[1] >= 0.0 && menu_content[1] + menu_content[3] <= win_h,
+            "open menu stays inside window bounds: {menu_content:?}"
+        );
+        let touches_below = (menu_content[1] - (trigger[1] + trigger[3])).abs() <= 16.0;
+        let touches_above = (trigger[1] - (menu_content[1] + menu_content[3])).abs() <= 16.0;
+        assert!(
+            touches_below || touches_above,
+            "open menu anchors to scrolled trigger: menu {menu_content:?}, trigger {trigger:?}"
+        );
+        // Select SEER (second session choice).
+        let (ix, iy) = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.text.as_deref() == Some("SEER"))
+            .map(|e| (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0))
+            .expect("SEER option in open menu");
+        rt.pointer_down(ix, iy);
+        rt.pointer_up(ix, iy);
+        settle_rt(&mut rt);
+        assert_eq!(
+            rt.state
+                .settings
+                .capture
+                .routing
+                .config()
+                .sites
+                .get("site-19.example.com")
+                .map(String::as_str),
+            Some("ses_seer")
+        );
     }
 }

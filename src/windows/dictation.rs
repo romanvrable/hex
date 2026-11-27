@@ -118,6 +118,8 @@ pub struct WindowsDictationConfig {
     pub terminal_paste_hotkey: Option<WindowsHotkey>,
     /// Labs › Second dictation shortcut, while the lab is on and it is bound.
     pub second_dictation_hotkey: Option<WindowsHotkey>,
+    /// Labs › Model switch shortcut, while the lab is on and it is bound.
+    pub model_switch_hotkey: Option<WindowsHotkey>,
     /// The Annotate key, while Annotate is on.
     pub annotate_hotkey: Option<WindowsHotkey>,
     /// Toggle mode's cancel shortcut; none in Hold mode.
@@ -178,6 +180,9 @@ impl WindowsDictationConfig {
                 .map(WindowsHotkey::from),
             second_dictation_hotkey: settings
                 .active_second_dictation_hotkey()
+                .map(WindowsHotkey::from),
+            model_switch_hotkey: settings
+                .active_model_switch_hotkey()
                 .map(WindowsHotkey::from),
             annotate_hotkey: settings
                 .capture_on()
@@ -651,14 +656,8 @@ pub fn run(
                 // dictation` neither start nor end anything.
                 HotkeyAction::Start | HotkeyAction::Finish | HotkeyAction::Cancel
                     if service.is_active() => {}
-                // Annotate records the narration itself: while it records,
-                // dictation starts nothing, unless Labs › Dictate while
-                // annotating lets it dictate as usual.
-                HotkeyAction::Start
-                    if !crate::labs::dictate_while_annotating()
-                        && capture_host
-                            .as_mut()
-                            .is_some_and(|host| host.recording_since(&timeline).is_some()) => {}
+                // An Annotate capture never takes the shortcut: it dictates
+                // as usual while the capture records.
                 // One key: a tap starts and stops; held while recording, it
                 // draws until it comes up.
                 HotkeyAction::Capture => {
@@ -815,6 +814,12 @@ pub fn run(
                     events.dictation(DictationPhase::Cancelled, "")?;
                     emit_current_state(&mut events, phase.is_recording(), pending, &device_label)?;
                     release_microphone!();
+                }
+                // Labs › Model switch shortcut: ask the host that owns model
+                // preparation to swap, installed only. A capture or a client's
+                // dictation keeps the model it started with.
+                HotkeyAction::ModelSwitch if phase.is_idle() && !service.is_active() => {
+                    crate::transcription::other_model::request();
                 }
                 HotkeyAction::PasteLast if phase.is_idle() => {
                     submit_paste_last(

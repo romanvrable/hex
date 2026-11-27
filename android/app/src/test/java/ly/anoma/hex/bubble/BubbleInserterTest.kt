@@ -131,19 +131,25 @@ class BubbleInserterTest {
     @Test fun bubbleModeSetupReachesReadyWithoutSwitchingAwayFromCurrentKeyboard() {
         val swiftKeyBubbleSetup = Setup(
             mic = true,
-            accessibility = true,
             enabled = false,
             chosen = false,
+            accessibility = true,
+            batteryUnrestricted = true,
             mode = InputMode.Bubble,
         )
         assertTrue(swiftKeyBubbleSetup.ready)
         assertEquals(0, swiftKeyBubbleSetup.missingSteps)
+        assertEquals(ly.anoma.hex.Next.Try, swiftKeyBubbleSetup.next)
+
+        val needsBatteryExemption = swiftKeyBubbleSetup.copy(batteryUnrestricted = false)
+        assertEquals(0, needsBatteryExemption.missingSteps)
+        assertEquals(ly.anoma.hex.Next.Battery, needsBatteryExemption.next)
 
         val keyboardSetup = Setup(
             mic = true,
-            accessibility = true,
             enabled = true,
             chosen = false,
+            accessibility = true,
             mode = InputMode.Keyboard,
         )
         assertFalse(keyboardSetup.ready)

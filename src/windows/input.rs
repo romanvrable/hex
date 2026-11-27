@@ -152,11 +152,13 @@ impl WindowsHotkey {
             .and_then(|number| number.parse::<u8>().ok())
             .is_some_and(|number| (1..=24).contains(&number));
         // Keys that type nothing may stand alone: function keys, mouse
-        // buttons, Menu, Pause, and Scroll Lock, and the navigation keys,
-        // which Settings allow alone only with Labs › Special keys alone.
+        // buttons, Menu, Pause, Scroll Lock, and Caps Lock. Navigation keys
+        // may also stand alone, but Settings gates those behind Labs ›
+        // Special keys alone.
         let types_nothing = function_key
             || HotkeyKey::mouse_number(key).is_some()
             || HotkeyKey::special_name(key)
+            || HotkeyKey::caps_lock_name(key)
             || HotkeyKey::navigation_name(key);
         if !types_nothing && modifier_count == 0 {
             return Err(eyre!(
@@ -210,6 +212,9 @@ pub enum HotkeyAction {
     Finish,
     Cancel,
     PasteLast,
+    /// Labs › Model switch shortcut: swap the dictation model with the saved
+    /// other one. It starts no capture.
+    ModelSwitch,
     /// The Annotate key went down, and came up (`CaptureUp`).
     Capture,
     CaptureUp,
@@ -269,6 +274,11 @@ struct CallbackState {
     second: Option<WindowsHotkey>,
     second_trigger_vk: Option<u32>,
     second_trigger_down: bool,
+    /// Labs › Model switch shortcut, while the lab is on and it is bound.
+    model_switch: Option<WindowsHotkey>,
+    model_switch_vk: Option<u32>,
+    /// The model switch key went down while Hex held it; its release is ours.
+    model_switch_down: bool,
     annotate: Option<WindowsHotkey>,
     annotate_trigger_vk: Option<u32>,
     annotate_trigger_down: bool,
@@ -279,6 +289,9 @@ struct CallbackState {
     cancel_vk: Option<u32>,
     /// The cancel key went down while Hex held it; its release is ours too.
     cancel_down: bool,
+    /// Labs › Confirm long cancels: when the capture started, and a cancel
+    /// press waiting for its second.
+    cancel_confirm: crate::dictation::cancel_confirm::CancelConfirm,
     modifiers: ModifierState,
     /// The same read with AltGr's synthesized Left Ctrl still counted, which
     /// a binding with a key has always seen (`ModifierState::holds`).
@@ -472,6 +485,7 @@ impl WindowsHotkeyMonitor {
         raw: Option<WindowsHotkey>,
         terminal_paste: Option<WindowsHotkey>,
         second: Option<WindowsHotkey>,
+        model_switch: Option<WindowsHotkey>,
         annotate: Option<WindowsHotkey>,
         cancel: Option<WindowsHotkey>,
         double_tap_enabled: bool,
@@ -491,6 +505,7 @@ impl WindowsHotkeyMonitor {
         let terminal_paste_trigger_vk =
             chord_virtual_key(terminal_paste.as_ref(), "Terminal paste shortcut")?;
         let second_trigger_vk = chord_virtual_key(second.as_ref(), "Second dictation shortcut")?;
+        let model_switch_vk = chord_virtual_key(model_switch.as_ref(), "Model switch shortcut")?;
         let annotate_trigger_vk = chord_virtual_key(annotate.as_ref(), "Annotate")?;
         let label = binding.label();
         let (event_sender, events) = mpsc::sync_channel(EVENT_CAPACITY);
@@ -513,6 +528,9 @@ impl WindowsHotkeyMonitor {
             second,
             second_trigger_vk,
             second_trigger_down: false,
+            model_switch,
+            model_switch_vk,
+            model_switch_down: false,
             annotate,
             annotate_trigger_vk,
             annotate_trigger_down: false,
@@ -520,6 +538,7 @@ impl WindowsHotkeyMonitor {
             cancel,
             cancel_vk,
             cancel_down: false,
+            cancel_confirm: Default::default(),
             modifiers: ModifierState::default(),
             raw_modifiers: ModifierState::default(),
             side_down: SideDownTimes::default(),
@@ -971,7 +990,13 @@ fn process_button(
             if cancel_event {
                 if is_down && !state.cancel_down {
                     state.cancel_down = true;
-                    if let Some(action) = state.capture.cancel() {
+                    // Labs › Confirm long cancels: a long capture's first
+                    // press asks and keeps recording.
+                    let cancels = state.cancel_confirm.press_with_notice(
+                        crate::labs::confirm_long_cancels(),
+                        std::time::Instant::now(),
+                    );
+                    if let Some(action) = cancels.then(|| state.capture.cancel()).flatten() {
                         watchdog::note_cancelled();
                         send_event(state, action, time);
                     }
@@ -1019,6 +1044,28 @@ fn process_button(
                     send_event(state, HotkeyAction::PasteLast, time);
                 } else if is_up {
                     state.paste_trigger_down = false;
+                }
+            } else if state.model_switch_vk == Some(vk)
+                && (state.model_switch_down
+                    || (is_down
+                        && state
+                            .model_switch
+                            .as_ref()
+                            .is_some_and(|binding| state.holds(binding))))
+            {
+                // Labs › Model switch shortcut: its key is Hex's whatever
+                // records, so a modifier it shares with a modifier-only
+                // dictation never reaches the app as a chord. The swap itself
+                // waits until no capture records.
+                suppressed = true;
+                state.mask_release |= is_down && holds_menu(state.model_switch.as_ref());
+                if is_down && !state.model_switch_down {
+                    state.model_switch_down = true;
+                    if state.capture.is_idle() && !state.dirty {
+                        send_event(state, HotkeyAction::ModelSwitch, time);
+                    }
+                } else if is_up {
+                    state.model_switch_down = false;
                 }
             } else if state.trigger_vk == Some(vk) {
                 if is_down {
@@ -1109,6 +1156,14 @@ fn holds_menu(binding: Option<&WindowsHotkey>) -> bool {
 }
 
 fn send_event(state: &mut CallbackState, action: HotkeyAction, timestamp_ms: u32) {
+    match action {
+        HotkeyAction::Start => state.cancel_confirm.started(std::time::Instant::now()),
+        HotkeyAction::Finish | HotkeyAction::Cancel => state.cancel_confirm.ended(),
+        HotkeyAction::PasteLast
+        | HotkeyAction::ModelSwitch
+        | HotkeyAction::Capture
+        | HotkeyAction::CaptureUp => {}
+    }
     match state.events.try_send(HotkeyEvent {
         action,
         flavour: state.capture.flavour(),
@@ -1131,6 +1186,9 @@ pub(crate) use chord::{ChordCapture, ChordPoll, NumpadWatch};
 /// Numpad Enter's code in a binding: Enter's virtual key with the extended
 /// flag, which no virtual key of its own names.
 const NUMPAD_ENTER: u32 = 0x100 | VK_RETURN as u32;
+
+/// Caps Lock's virtual key.
+const VK_CAPITAL: u16 = 0x14;
 
 /// The numpad key a keyboard hook last saw go down and not yet up, by its
 /// `num` code, for the chord capture: polled key state can't tell Numpad 1
@@ -1193,7 +1251,7 @@ fn numpad_key(event: &KBDLLHOOKSTRUCT) -> Option<u32> {
 /// [`virtual_key`] accepts (letters, digits, function keys, and the
 /// layout's punctuation are scanned separately). Numpad keys are named
 /// `num 1`, `num *`, ...: their own keys, not the top row's.
-const CAPTURE_NAMED_KEYS: [(u16, &str); 45] = [
+const CAPTURE_NAMED_KEYS: [(u16, &str); 46] = [
     (VK_SPACE, "space"),
     (VK_RETURN, "enter"),
     (VK_TAB, "tab"),
@@ -1210,6 +1268,10 @@ const CAPTURE_NAMED_KEYS: [(u16, &str); 45] = [
     (0x28, "down"),
     (0x13, "pause"),
     (0x91, "scroll lock"),
+    // The recorder reads Caps Lock from its hook, which keeps the press
+    // (`chord::CAPS_LOCK_DOWN`); a shortcut on it keeps every press it fires
+    // on, so the lock never flips.
+    (VK_CAPITAL, "caps lock"),
     (0x5D, "menu"),
     // The punctuation keys, by their layout-independent virtual keys; the
     // keycap shows what each types on the active layout (`keycap_label`).
@@ -1305,6 +1367,7 @@ pub(crate) fn virtual_key(key: &str) -> Result<u32> {
         "return" => u32::from(VK_RETURN),
         "escape" => u32::from(VK_ESCAPE),
         "num enter" => NUMPAD_ENTER,
+        name if HotkeyKey::caps_lock_name(name) => u32::from(VK_CAPITAL),
         name if HotkeyKey::special_name(name) && name != "menu" && name != "pause" => 0x91,
         "page_up" => 0x21,
         "page_down" => 0x22,
@@ -1421,6 +1484,9 @@ mod tests {
             second: None,
             second_trigger_vk: None,
             second_trigger_down: false,
+            model_switch: None,
+            model_switch_vk: None,
+            model_switch_down: false,
             annotate: None,
             annotate_trigger_vk: None,
             annotate_trigger_down: false,
@@ -1428,6 +1494,7 @@ mod tests {
             cancel: None,
             cancel_vk: None,
             cancel_down: false,
+            cancel_confirm: Default::default(),
             modifiers: ModifierState::default(),
             raw_modifiers: ModifierState::default(),
             side_down: SideDownTimes::default(),
@@ -1498,6 +1565,11 @@ mod tests {
         assert_ne!(virtual_key("num 1").unwrap(), virtual_key("1").unwrap());
         assert_eq!(HotkeyKey::named("num *").label, "Num *");
         assert_eq!(HotkeyKey::named("scroll lock").label, "Scroll Lock");
+        // Caps Lock, however `hex settings` spells it.
+        for name in ["caps lock", "capslock", "caps_lock", "Caps Lock"] {
+            assert_eq!(virtual_key(name).unwrap(), u32::from(VK_CAPITAL), "{name}");
+            assert_eq!(HotkeyKey::named(name).label, "Caps Lock");
+        }
     }
 
     #[test]
@@ -1536,7 +1608,8 @@ mod tests {
         assert!(alone("pause").validate().is_ok());
         assert!(alone("scroll lock").validate().is_ok());
         assert!(alone("menu").validate().is_ok());
-        // Settings gate these behind Labs › Special keys alone.
+        assert!(alone("caps lock").validate().is_ok());
+        // Settings gate navigation keys behind Labs › Special keys alone.
         assert!(alone("home").validate().is_ok());
         assert!(alone("num 5").validate().is_err());
         let control = WindowsHotkey {
@@ -2361,5 +2434,61 @@ mod tests {
         assert_eq!(state.press(true, true, 1_000), None);
         assert_eq!(state.release(true, 1_040), None);
         assert!(!state.is_locked());
+    }
+    /// Labs › Model switch shortcut shares a modifier with a modifier-only
+    /// dictation (Right Alt holds the capture, Alt+M switches). Pressed while
+    /// that capture records, the switch key is Hex's own and must neither
+    /// reach the app nor end the capture; the modifier's release still
+    /// finishes it.
+    #[test]
+    fn the_model_switch_key_never_ends_a_modifier_only_capture() {
+        let _state = state_lock();
+        let right_alt = WindowsHotkey {
+            alt: Some(ModifierSide::Right),
+            ..WindowsHotkey::default()
+        };
+        let (mut state, events) = callback_state_value(right_alt, false);
+        let m = virtual_key("m").expect("m is a key");
+        state.model_switch = Some(WindowsHotkey {
+            alt: Some(ModifierSide::Either),
+            key: Some("m".into()),
+            ..WindowsHotkey::default()
+        });
+        state.model_switch_vk = Some(m);
+        // A modifier-only binding starts the capture on its modifier alone.
+        state.trigger_vk = None;
+        *CALLBACK_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(state);
+
+        let alt = u32::from(VK_RMENU);
+        let alt_held = |key: u16| key == VK_RMENU;
+
+        // Right Alt alone starts the modifier-only capture.
+        let _ = process_button(alt, LeftControl::Other, true, 1_000, alt_held);
+        assert_eq!(
+            events.try_recv().map(|event| event.action),
+            Ok(HotkeyAction::Start)
+        );
+
+        // Alt+M while it records: swallowed, and nothing is sent.
+        let switch = process_button(m, LeftControl::Other, true, 1_100, alt_held);
+        assert_eq!(switch.disposition, Disposition::Suppress);
+        assert!(events.try_recv().is_err());
+        let release = process_button(m, LeftControl::Other, false, 1_150, alt_held);
+        assert_eq!(release.disposition, Disposition::Suppress);
+        assert!(events.try_recv().is_err());
+
+        // Its modifier still finishes the capture.
+        let _ = process_button(alt, LeftControl::Other, false, 1_200, |_| false);
+        assert_eq!(
+            events.try_recv().map(|event| event.action),
+            Ok(HotkeyAction::Finish)
+        );
+
+        CALLBACK_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }

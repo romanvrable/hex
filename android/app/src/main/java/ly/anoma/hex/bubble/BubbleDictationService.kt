@@ -1,6 +1,7 @@
 package ly.anoma.hex.bubble
 
 import android.accessibilityservice.AccessibilityService
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -16,10 +17,17 @@ import ly.anoma.hex.MainActivity
 import ly.anoma.hex.R
 import ly.anoma.hex.speech.SpeechPhase
 
-/** Keeps Android's background microphone permission active while the floating bubble is turned on.
- * Unlike always-loaded engines, the Whisper weights themselves are owned by [ly.anoma.hex.speech.SpeechModel]
- * (0 MB idle, warm-loaded on bubble press, and freed after 2 minutes idle or on memory pressure). */
+/** On-demand foreground microphone service started ONLY from a foreground [Activity] ([ArmActivity]) when
+ * an OEM restricts direct [HexAccessibilityService] mic access. Stops itself automatically after
+ * [IDLE_STOP_MS] without dictation, so zero foreground services run overnight and background
+ * `ForegroundServiceDidNotStartInTimeException` crashes are impossible. */
 class BubbleDictationService : Service() {
+    private val main = Handler(Looper.getMainLooper())
+    private val idleStop = Runnable {
+        if (lastPhase == SpeechPhase.Idle) stopSelf()
+    }
+    private var lastPhase = SpeechPhase.Idle
+
     override fun onCreate() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
@@ -37,28 +45,37 @@ class BubbleDictationService : Service() {
         }
         running = true
         instance = this
+        scheduleIdleStop()
         HexAccessibilityService.instance?.refreshBubble()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!running) return START_NOT_STICKY
         when (intent?.action) {
             ACTION_TURN_OFF -> {
                 BubblePreferences(this).enabled = false
                 HexAccessibilityService.instance?.cancelBubbleSpeech(silent = true)
                 HexAccessibilityService.instance?.refreshBubble()
                 stopSelf()
+                return START_NOT_STICKY
             }
             ACTION_PASTE_LAST -> {
                 HexAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
-                Handler(Looper.getMainLooper()).postDelayed({
+                main.postDelayed({
                     HexAccessibilityService.instance?.pasteLastDictation()
                 }, 550L)
             }
         }
+        scheduleIdleStop()
         return START_NOT_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopSelf()
+    }
+
     override fun onDestroy() {
+        main.removeCallbacks(idleStop)
         running = false
         if (instance === this) instance = null
         HexAccessibilityService.instance?.refreshBubble()
@@ -68,10 +85,17 @@ class BubbleDictationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     internal fun updatePhase(phase: SpeechPhase) {
+        lastPhase = phase
         if (!running) return
+        if (phase == SpeechPhase.Idle) scheduleIdleStop() else main.removeCallbacks(idleStop)
         runCatching {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(phase))
         }
+    }
+
+    private fun scheduleIdleStop() {
+        main.removeCallbacks(idleStop)
+        main.postDelayed(idleStop, IDLE_STOP_MS)
     }
 
     private fun buildNotification(phase: SpeechPhase): Notification {
@@ -112,6 +136,7 @@ class BubbleDictationService : Service() {
     companion object {
         private const val CHANNEL_ID = "hex_bubble"
         private const val NOTIFICATION_ID = 1001
+        private const val IDLE_STOP_MS = 180_000L
         const val ACTION_TURN_OFF = "ly.anoma.hex.action.BUBBLE_OFF"
         const val ACTION_PASTE_LAST = "ly.anoma.hex.action.PASTE_LAST"
 
@@ -121,14 +146,16 @@ class BubbleDictationService : Service() {
         @Volatile internal var instance: BubbleDictationService? = null
             private set
 
-        fun start(context: Context): Boolean = try {
-            context.startForegroundService(Intent(context.applicationContext, BubbleDictationService::class.java))
+        /** Must ONLY be called from a visibly resumed foreground [Activity], never from background services. */
+        fun startFromForegroundActivity(activity: Activity): Boolean = try {
+            activity.startForegroundService(Intent(activity.applicationContext, BubbleDictationService::class.java))
             true
         } catch (_: Exception) {
             false
         }
 
         fun stop(context: Context) {
+            if (!running) return
             runCatching { context.stopService(Intent(context.applicationContext, BubbleDictationService::class.java)) }
         }
     }

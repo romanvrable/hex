@@ -543,6 +543,16 @@ fn mouse_hotkeys() -> RuntimeHotkeys {
 }
 
 #[test]
+fn a_tap_macos_keeps_disabled_is_rebuilt_less_often_up_to_once_a_minute() {
+    // A tap rebuilt every health check piled up registrations (#2968).
+    let seconds: Vec<f64> = (0..7)
+        .map(|stuck| f64::from(disabled_retry_skips(stuck) + 1) * TAP_HEALTH_INTERVAL_SECONDS)
+        .collect();
+    assert_eq!(seconds, [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0]);
+    assert_eq!(disabled_retry_skips(u32::MAX), MAX_DISABLED_RETRY_SKIPS);
+}
+
+#[test]
 fn mouse_events_reach_the_filtering_tap_only_while_a_mouse_shortcut_is_bound() {
     // Idle clicks and drags on a filtering tap broke dragging windows
     // between displays and Spaces (#1215).
@@ -4713,6 +4723,39 @@ fn escape_during_a_capture_ends_nothing() {
     assert!(hotkey.is_recording());
 }
 
+/// Holding ⌥ while a screen capture records dictates as usual: the capture
+/// shortcut answers nothing to either edge, so the listener hands both to
+/// dictation, which starts on the press and finishes on the release. The
+/// capture keeps recording (its shortcut neither finished nor drew).
+#[cfg(hex_capture)]
+#[test]
+fn holding_option_dictates_while_a_capture_records() {
+    use crate::capture_host::{CaptureShortcut, ShortcutAction, ShortcutActivity};
+    let now = capture_time();
+    let mut hotkey = test_hotkey(false, now);
+    let mut capture = CaptureShortcut::default();
+    let recording = ShortcutActivity::Recording {
+        elapsed: std::time::Duration::from_secs(5),
+    };
+    let hotkeys = RuntimeHotkeys::default();
+    let press = InputEvent::Flags(OPTION_KEY_MASK);
+    let release = InputEvent::Flags(0);
+    assert_eq!(
+        capture.input(press, hotkeys, recording),
+        ShortcutAction::None
+    );
+    assert_eq!(hotkey.process(press, now), Some(HotkeyAction::Start));
+    assert!(hotkey.is_recording());
+    assert_eq!(
+        capture.input(release, hotkeys, recording),
+        ShortcutAction::None
+    );
+    assert_eq!(
+        hotkey.process(release, now + Duration::from_secs(2)),
+        Some(HotkeyAction::Finish)
+    );
+}
+
 #[test]
 fn escape_is_suppressed_only_while_hex_takes_it() {
     let mut suppression = ShortcutSuppression::default();
@@ -5191,4 +5234,155 @@ fn tap_policy_claims_nothing_during_programmatic_and_combines_escape_with_cancel
     let toggle_cancel = TapPolicy::for_listener(false, false, false, Some(cancel));
     assert!(!toggle_cancel.takes_escape());
     assert_eq!(toggle_cancel.cancel(), Some(cancel));
+}
+
+/// Labs › Model switch shortcut's key is swallowed while a capture records,
+/// so the press cannot strand it: a held capture still finishes on release,
+/// and a locked one still finishes on the next press.
+#[test]
+fn a_switch_press_never_strands_a_capture() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Guard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            crate::app_settings::install_test_hotkeys(RuntimeHotkeys::default());
+        }
+    }
+    let _guard = Guard {
+        _lock: LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+    };
+    let code = 46;
+    crate::app_settings::install_test_hotkeys(RuntimeHotkeys {
+        model_switch: Some(RuntimeHotkey {
+            modifiers: crate::app_settings::modifiers_from_flags(
+                OPTION_KEY_MASK | CONTROL_KEY_MASK,
+            ),
+            key_code: Some(code),
+        }),
+        ..RuntimeHotkeys::default()
+    });
+    let now = capture_time();
+    let switch_down = InputEvent::Key {
+        code,
+        down: true,
+        flags: OPTION_KEY_MASK | CONTROL_KEY_MASK,
+    };
+    let switch_up = InputEvent::Key {
+        code,
+        down: false,
+        flags: OPTION_KEY_MASK | CONTROL_KEY_MASK,
+    };
+
+    // Hold: the switch press is swallowed and the release still finishes.
+    let mut held = test_hotkey(false, now);
+    assert_eq!(
+        held.process(InputEvent::Flags(OPTION_KEY_MASK), now),
+        Some(HotkeyAction::Start)
+    );
+    let held_at = now + Duration::from_millis(600);
+    assert_eq!(held.process(switch_down, held_at), None);
+    assert!(held.is_recording());
+    assert_eq!(
+        held.process(switch_up, held_at + Duration::from_millis(20)),
+        None
+    );
+    assert_eq!(
+        held.process(
+            InputEvent::Flags(NO_FLAGS),
+            held_at + Duration::from_millis(100)
+        ),
+        Some(HotkeyAction::Finish)
+    );
+
+    // A locked capture holds no modifier, so its switch chord needn't name
+    // the dictation one.
+    crate::app_settings::install_test_hotkeys(RuntimeHotkeys {
+        model_switch: Some(RuntimeHotkey {
+            modifiers: crate::app_settings::modifiers_from_flags(CONTROL_KEY_MASK),
+            key_code: Some(code),
+        }),
+        ..RuntimeHotkeys::default()
+    });
+    let switch_down = InputEvent::Key {
+        code,
+        down: true,
+        flags: CONTROL_KEY_MASK,
+    };
+    let switch_up = InputEvent::Key {
+        code,
+        down: false,
+        flags: CONTROL_KEY_MASK,
+    };
+
+    // Locked: the switch press leaves it locked, and the next press finishes.
+    let mut locked = toggle_hotkey(now, false);
+    assert_eq!(
+        locked.process(InputEvent::Flags(OPTION_KEY_MASK), now),
+        Some(HotkeyAction::Start)
+    );
+    assert_eq!(
+        locked.process(InputEvent::Flags(NO_FLAGS), now + Duration::from_millis(80)),
+        None
+    );
+    assert!(locked.is_locked());
+    assert_eq!(
+        locked.process(switch_down, now + Duration::from_millis(200)),
+        None
+    );
+    assert_eq!(
+        locked.process(switch_up, now + Duration::from_millis(220)),
+        None
+    );
+    assert!(locked.is_locked());
+    assert_eq!(
+        locked.process(
+            InputEvent::Flags(OPTION_KEY_MASK),
+            now + Duration::from_millis(400)
+        ),
+        Some(HotkeyAction::Finish)
+    );
+}
+
+/// Labs › Middle mouse dictation's Escape on a hands-free capture follows
+/// Labs › Confirm long cancels like every other cancel: on a capture past
+/// the long-recording threshold, the first Escape asks and the second
+/// cancels.
+#[test]
+fn escape_on_a_long_hands_free_capture_asks_first_with_confirm_long_cancels() {
+    let now = capture_time();
+    let escape = InputEvent::Key {
+        code: ESCAPE_KEY_CODE,
+        down: true,
+        flags: NO_FLAGS,
+    };
+    let mut hotkey =
+        DictationHotkey::new(now, false, crate::app_settings::RuntimeHotkey::default());
+    hotkey.set_escape_cancels_lock(true);
+    hotkey.confirm_long_cancels = || true;
+    assert!(hotkey.lock());
+    let Some(started) = std::time::Instant::now()
+        .checked_sub(crate::dictation::cancel_confirm::LONG_RECORDING + Duration::from_secs(1))
+    else {
+        return;
+    };
+    hotkey.cancel_confirm.started(started);
+    assert!(hotkey.takes_escape(now));
+    assert_eq!(hotkey.process(escape, now), None, "the first Escape asks");
+    assert!(hotkey.is_locked());
+    let release = InputEvent::Key {
+        code: ESCAPE_KEY_CODE,
+        down: false,
+        flags: NO_FLAGS,
+    };
+    assert_eq!(
+        hotkey.process(release, now + Duration::from_millis(100)),
+        None
+    );
+    assert_eq!(
+        hotkey.process(escape, now + Duration::from_millis(500)),
+        Some(HotkeyAction::CancelShortcut)
+    );
+    assert!(!hotkey.is_recording());
 }

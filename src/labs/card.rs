@@ -20,6 +20,7 @@ impl Feature {
             Self::LearnFromCorrections => "Learn from corrections",
             Self::TerminalPaste => "Terminal paste",
             Self::KeyboardModelSwitching => "Switch model with keyboard language",
+            Self::ModelSwitchShortcut => "Model switch shortcut",
             Self::MouseShortcuts => "Mouse shortcuts",
             Self::PauseBrowser => "Also pause the browser",
             Self::ShareShortcut => "Share dictation shortcut with other apps",
@@ -32,6 +33,7 @@ impl Feature {
             Self::FillerWords => "Remove filler words",
             Self::CleanUpWithAppleIntelligence => "Clean up with Apple Intelligence",
             Self::NeutralVoice => "Neutral voice",
+            Self::CleanupTagger => "Clean up what I say",
             Self::SecondDictationShortcut => "Second dictation shortcut",
             Self::TerminalPasteShortcut => "Terminal paste shortcut",
             Self::SmartSpacing => "Smart spacing",
@@ -92,12 +94,16 @@ impl Feature {
             Self::Signature => "Signature",
             Self::DictationStyle => "Dictation style",
             Self::HudHeight => "HUD height",
+            Self::IndicatorFollowsMouse => "Indicator follows mouse",
             Self::VoiceIsolation => "Voice isolation",
-            Self::DictateWhileAnnotating => "Dictate while annotating",
             Self::StopAnyCallRecording => "Stop every call recording when the call ends",
             Self::ClipboardPhrase => "Clipboard phrase",
             Self::MeetingMicrophoneMute => "Mute the microphone while recording",
+            Self::ConfirmLongCancels => "Confirm long cancels",
             Self::MeetingIndicatorDisplay => "Indicator on any display",
+            Self::MeetingAudioSource => "Choose meeting audio",
+            Self::MiddleMouseDictation => "Middle mouse dictation",
+            Self::MeetingSpeakerNames => "Speaker names",
         }
     }
 
@@ -130,6 +136,9 @@ impl Feature {
             Self::KeyboardModelSwitching => {
                 "When you switch keyboard language, Hex switches to the speech model you picked for it"
             }
+            Self::ModelSwitchShortcut => {
+                "One shortcut swaps dictation to another model and language, and pressing it again swaps back"
+            }
             Self::MouseShortcuts => "Use a mouse button, such as a side button, as a shortcut",
             Self::PauseBrowser => {
                 "While dictating with Pause media: YouTube and other tabs, resumed only if Hex paused them"
@@ -161,6 +170,9 @@ impl Feature {
             }
             Self::NeutralVoice => {
                 "Rewrite dictations in chosen modes into plain, neutral wording on this Mac, so your writing style doesn't show"
+            }
+            Self::CleanupTagger => {
+                "Remove ums, repeats, and things you correct out loud from English dictations, with a small model on this Mac that never adds a word"
             }
             Self::SecondDictationShortcut => {
                 "Another shortcut that dictates like the main one, such as a key on an external keyboard"
@@ -308,6 +320,9 @@ impl Feature {
             Self::StopPhrase => {
                 "Say a phrase to finish a hands-free dictation; the phrase isn't added to the text"
             }
+            Self::ConfirmLongCancels => {
+                "After 10 seconds, cancelling a dictation takes two presses, so one slip keeps your words"
+            }
             Self::HoldThroughKeys if cfg!(target_os = "windows") => {
                 "If a shortcut is made only of Ctrl, Alt, Shift, or the Windows key, with no letter or number key, pressing another key or clicking after the first second no longer ends the dictation; let go to finish"
             }
@@ -342,11 +357,11 @@ impl Feature {
             Self::HudHeight => {
                 "Choose how high the dictation HUD sits above the Dock when it's at the bottom"
             }
+            Self::IndicatorFollowsMouse => {
+                "Show the dictation indicator next to your mouse pointer instead of at the top or bottom of the screen"
+            }
             Self::VoiceIsolation => {
                 "Record dictation through Apple's voice processing so Mic Mode can turn on Voice Isolation and cut background noise."
-            }
-            Self::DictateWhileAnnotating => {
-                "Dictate while a capture records: the text pastes as usual, and the capture keeps going"
             }
             Self::StopAnyCallRecording if !cfg!(target_os = "macos") => {
                 "Also stop an offered or by-hand call recording 30 s after its call app leaves the microphone, even with Stop when the call ends off"
@@ -362,6 +377,15 @@ impl Feature {
             }
             Self::MeetingIndicatorDisplay => {
                 "Drag the meeting recording indicator to another display and it stays there"
+            }
+            Self::MeetingAudioSource => {
+                "Record one app or one output device in meetings instead of all computer audio"
+            }
+            Self::MiddleMouseDictation => {
+                "Hold the middle mouse button for half a second to start dictating hands-free, and again to finish. Escape cancels"
+            }
+            Self::MeetingSpeakerNames => {
+                "Read who is speaking from Slack huddles to name remote speakers in meeting transcripts"
             }
         }
     }

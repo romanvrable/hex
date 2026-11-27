@@ -32,7 +32,10 @@ mod send;
 mod session_name;
 
 pub use rule_match::{AutoSendBy, RuleMatch};
-use send::{Clock, DeliverOutcome, PickAction, SavedRule, SendState, Sent, UndoPlan};
+use send::{
+    Clock, DeliverOutcome, PickAction, SavedRule, SendState, Sent, UndoPlan, delivery_kind,
+    describe,
+};
 
 #[cfg(test)]
 use session_name::session_name_by;
@@ -172,21 +175,22 @@ pub enum RouteDelivery {
 // ---------------------------------------------------------------------------
 // The router.
 
-/// The router with Hex's `capture.routing` and Scrawl's folders under
-/// `~/Library/Application Support/scrawl`. Never reads
+/// The router with Hex's `capture.routing` and private annotation-router folder. Never reads
 /// `~/.config/scrawl`. Its own log lines name sites and sessions, so they
 /// go to tracing's debug level, except how sends went (`deliver: …`).
 pub fn router() -> Router {
     let settings = crate::app_settings::capture_settings();
     let config = settings.routing.config().clone();
-    let support = crate::app_paths::home_dir()
-        .unwrap_or_default()
-        .join("Library/Application Support/scrawl");
-    let dirs = RouterDirs::under(
-        &support.join("router"),
-        Some(support.join("routing-decisions.jsonl")),
-        Some(settings.captures_dir()),
-    );
+    let dirs = crate::app_paths::support_dir()
+        .map(|support| {
+            let router = support.join("annotation-router");
+            RouterDirs::under(
+                &router,
+                Some(router.join("routing-decisions.jsonl")),
+                Some(settings.captures_dir()),
+            )
+        })
+        .unwrap_or_default();
     let router = Router::new(config, dirs)
         .with_log(|line| {
             if line.starts_with("deliver:") || line.starts_with("routing time:") {
@@ -755,8 +759,10 @@ impl Worker {
             }
             UndoPlan::RetriedNoHandle => true,
             UndoPlan::Queued => {
-                // Its retries stop with the marker.
                 let _ = std::fs::remove_file(current.bundle.join(delivery::PENDING));
+                if let Some(q) = current.router.dirs().retries.as_deref() {
+                    delivery::annotations::forget(q, &current.bundle);
+                }
                 self.correct(jev::Action::Cancel, "dismiss", None);
                 true
             }
@@ -933,13 +939,21 @@ impl Worker {
         }
         let router = router();
         let captures = crate::app_settings::capture_settings().captures_dir();
-        let report = router.run(|| {
-            delivery::retry_due(
-                &captures,
-                now_ms(),
-                scrawl_capture::handoff::send_bundle_to_session,
-            )
-        });
+        let report = router
+            .dirs()
+            .retries
+            .as_deref()
+            .map(|q| {
+                router.run(|| {
+                    delivery::annotations::retry(
+                        q,
+                        &captures,
+                        now_ms(),
+                        scrawl_capture::handoff::send_bundle_to_session,
+                    )
+                })
+            })
+            .unwrap_or_default();
         let outbox = router.retry_outbox();
         if !report.sent.is_empty() || !outbox.sent.is_empty() {
             tracing::info!(
@@ -1148,11 +1162,6 @@ fn forget_rule(saved: &SavedRule) {
     }
 }
 
-/// Whether `config` authorizes Jev's confident picks to auto-send.
-fn auto_send_jev(config: &RouterConfig) -> bool {
-    config.auto_send == policy::AutoSend::Confident && config.jev_enabled()
-}
-
 /// The answer to show, and the destination of a rule's send.
 fn answer_for(
     decided: Decided,
@@ -1335,18 +1344,6 @@ fn recorded_destination(bundle: &Path) -> Option<Destination> {
         .and_then(|(_, loaded)| loaded.destination)
 }
 
-/// A delivery as a sentence for `hex capture send`.
-fn describe(delivery: &RouteDelivery) -> String {
-    match delivery {
-        RouteDelivery::Sending { to } => format!("Sending to {to}"),
-        RouteDelivery::Sent { to } => format!("Sent to {to}"),
-        RouteDelivery::Queued { to, why } => format!("Queued for {to}: {why}"),
-        RouteDelivery::TakenBack => "Taken back".into(),
-        RouteDelivery::TooLate { to } => format!("Already read in {to}"),
-        RouteDelivery::Failed { to, why } => format!("Not sent to {to}: {why}"),
-    }
-}
-
 /// Records where the capture went in its bundle, sends it, and remembers
 /// the send for an undo. A send OpenCode didn't take is queued for
 /// [`Worker::retry`].
@@ -1378,6 +1375,13 @@ fn deliver(
         );
         if let Err(error) = recorded {
             tracing::warn!(error = %format!("{error:#}"), "could not record a capture's destination");
+        }
+        // An explicit new send supersedes any earlier queued attempt.
+        if scrawl_capture::bundle::manifest_name(bundle) == Some(scrawl_capture::bundle::MANIFEST) {
+            let _ = std::fs::remove_file(bundle.join(delivery::PENDING));
+            if let Some(q) = router.dirs().retries.as_deref() {
+                delivery::annotations::forget(q, bundle);
+            }
         }
         let (delivery, posted) = delivery::deliver_by(
             bundle,
@@ -1411,6 +1415,19 @@ fn deliver(
                 offer: routing::learn_capture(bundle, &dest.session),
             },
             Delivery::Queued { error, .. } => {
+                let remembered = scrawl_capture::bundle::manifest_name(bundle)
+                    != Some(scrawl_capture::bundle::MANIFEST)
+                    || router
+                        .dirs()
+                        .retries
+                        .as_deref()
+                        .is_some_and(|q| delivery::annotations::remember(q, bundle, &dest.session).is_ok());
+                if !remembered {
+                    return DeliverOutcome::Failed {
+                        to,
+                        why: "Couldn't remember this send for retry".into(),
+                    };
+                }
                 let agent_host = router.config().agent_host().is_some();
                 let why = send_why(&error, agent_host);
                 if why == FILES_UNSEEN {
@@ -1471,17 +1488,6 @@ fn answer_kind(answer: &RouteAnswer) -> &'static str {
     }
 }
 
-fn delivery_kind(delivery: &RouteDelivery) -> &'static str {
-    match delivery {
-        RouteDelivery::Sending { .. } => "sending",
-        RouteDelivery::Sent { .. } => "sent",
-        RouteDelivery::Queued { .. } => "queued",
-        RouteDelivery::TakenBack => "taken-back",
-        RouteDelivery::TooLate { .. } => "too-late",
-        RouteDelivery::Failed { .. } => "failed",
-    }
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1490,6 +1496,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CaptureEnd;
     use super::*;
 
     fn candidate(id: &str, title: &str, updated_ms: u64) -> smart::Candidate {
@@ -2141,7 +2148,7 @@ mod tests {
                 let outcomes = SharedOutcomes::default();
                 let mut worker = worker(outcomes.clone());
                 let bundle = written("com.example.board");
-                lock(&outcomes).fail(bundle.clone(), "test".into());
+                lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
                 let started = Instant::now();
                 worker.written(bundle, look);
                 assert!(started.elapsed() < Duration::from_millis(200));
@@ -2207,7 +2214,7 @@ mod tests {
                         let mut worker = worker(outcomes.clone());
                         worker.forward = post;
                         let bundle = written("com.example.browser");
-                        lock(&outcomes).fail(bundle.clone(), "test".into());
+                        lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
                         worker.written(bundle.clone(), look);
                         assert!(worker.current.as_ref().unwrap().sent_session().is_none());
                         worker.hold(true);
@@ -2265,7 +2272,7 @@ mod tests {
             let outcomes = SharedOutcomes::default();
             let mut worker = worker(outcomes.clone());
             let bundle = written("com.example.board");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             worker.written(bundle.clone(), look);
             // The local read saw nothing, so the rule's send is due at once.
             worker
@@ -2316,7 +2323,7 @@ mod tests {
             let outcomes = SharedOutcomes::default();
             let mut worker = worker(outcomes.clone());
             let bundle = written("com.example.board");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             worker.written(bundle.clone(), look);
             // As if the local read found no rule yet, and its hold ran out
             // while the capsule still said nothing.
@@ -2368,7 +2375,7 @@ mod tests {
             let mut worker = worker(outcomes.clone());
             worker.forward = post;
             let bundle = written("com.example.board");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             worker.written(bundle.clone(), look);
             worker.hold(true);
             // Its window ran out while the pointer was on the capsule.
@@ -2423,10 +2430,10 @@ mod tests {
             let mut worker = worker(outcomes.clone());
             worker.forward = post;
             let first = written("com.example.board");
-            lock(&outcomes).fail(first.clone(), "test".into());
+            lock(&outcomes).settle(first.clone(), CaptureEnd::Failed("test".into()));
             worker.written(first.clone(), look);
             let second = written("com.example.other");
-            lock(&outcomes).fail(second.clone(), "test".into());
+            lock(&outcomes).settle(second.clone(), CaptureEnd::Failed("test".into()));
             let (look, later) = held_look(router_with(|_| {}), look::Live::default());
             worker.written(second.clone(), look);
             assert_eq!(worker.older.len(), 1);
@@ -2459,7 +2466,7 @@ mod tests {
             let outcomes = SharedOutcomes::default();
             let mut worker = worker(outcomes.clone());
             let bundle = written("com.example.board");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             worker.written(bundle.clone(), look);
             let (updates, pending) = preparation::fed();
             worker.pending = Some(pending);
@@ -2535,7 +2542,7 @@ mod tests {
             let outcomes = SharedOutcomes::default();
             let mut worker = worker(outcomes.clone());
             let bundle = written("com.example.board");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             worker.written(bundle.clone(), look);
             worker.chosen("ses_home", false);
             let _ = found.send(Some(look::Live::default()));
@@ -2923,7 +2930,10 @@ mod tests {
             let a = written("com.brave.Browser");
             let look = look_with(context, router_with(|_| {}), senses(dev_tab)).unwrap();
             // B, started while A was looked at, is written first.
-            lock(&outcomes).fail(written("com.example.board"), "test".into());
+            lock(&outcomes).settle(
+                written("com.example.board"),
+                CaptureEnd::Failed("test".into()),
+            );
             worker.written(a.clone(), look);
             settle(&mut worker);
             assert!(worker.resolve("BOARD").is_none(), "the capsule shows B");
@@ -2948,7 +2958,7 @@ mod tests {
             let outcomes = SharedOutcomes::default();
             let mut worker = worker(outcomes.clone());
             let bundle = written("com.brave.Browser");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             let look = look_with(context, router_with(|_| {}), senses(dev_tab)).unwrap();
             worker.written(bundle, look);
             settle(&mut worker);
@@ -3013,6 +3023,47 @@ mod tests {
             }
         }
 
+        /// The hosted Jev lookup runs only while `Auto-send with Jev` is on, so a
+        /// settings file left with `jevRouting` on and `autoSend` back at
+        /// `rules` never reaches Jev.
+        #[test]
+        fn only_an_on_auto_send_with_jev_asks_jev() {
+            static ASKED: AtomicU64 = AtomicU64::new(0);
+            fn ask(_: &[u8], _: Duration) -> anyhow::Result<Vec<u8>> {
+                ASKED.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("test Jev")
+            }
+            for (auto_send, asks) in [
+                (policy::AutoSend::Rules, 0),
+                (policy::AutoSend::Confident, 1),
+            ] {
+                ASKED.store(0, Ordering::Relaxed);
+                let router = router_with(|c| {
+                    c.smart_routing = true;
+                    c.jev_routing = true;
+                    c.auto_send = auto_send;
+                });
+                let live = look::Live {
+                    candidates: vec![
+                        candidate("ses_board", "BOARD", 30),
+                        candidate("ses_home", "HOME", 20),
+                    ],
+                    ..look::Live::default()
+                };
+                let (mut look, found) = held_look(router, live.clone());
+                look.model.ask = ask;
+                let outcomes = SharedOutcomes::default();
+                let mut worker = worker(outcomes.clone());
+                let bundle = written("com.example.board");
+                lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
+                worker.written(bundle.clone(), look);
+                found.send(Some(live)).unwrap();
+                settle(&mut worker);
+                assert_eq!(ASKED.load(Ordering::Relaxed), asks, "{auto_send:?}");
+                std::fs::remove_dir_all(bundle.parent().unwrap()).unwrap();
+            }
+        }
+
         #[test]
         fn a_look_past_its_deadline_is_routed_without() {
             let (_looking, seen) = mpsc::sync_channel(1);
@@ -3048,7 +3099,7 @@ mod tests {
             let mut worker = worker(outcomes.clone());
             worker.forward = offline;
             let bundle = written("com.brave.Browser");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             let look = look_with(context, router_with(|_| {}), senses(dev_tab)).unwrap();
             worker.written(bundle.clone(), look);
             settle(&mut worker);
@@ -3107,7 +3158,7 @@ mod tests {
             let mut worker = worker(outcomes.clone());
             worker.forward = offline;
             let bundle = written("com.brave.Browser");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
+            lock(&outcomes).settle(bundle.clone(), CaptureEnd::Failed("test".into()));
             let look = look_with(context, router_with(|_| {}), senses(dev_tab)).unwrap();
             worker.written(bundle.clone(), look);
             settle(&mut worker);
@@ -3132,6 +3183,44 @@ mod tests {
                 Some("ses_home")
             );
             std::fs::remove_dir_all(bundle.parent().unwrap()).ok();
+        }
+
+        #[test]
+        fn hex_annotation_queued_send_writes_private_receipt_and_undo_forgets_it() {
+            fn offline(_: &Path, _: &str) -> anyhow::Result<scrawl_capture::handoff::Posted> {
+                anyhow::bail!("Could not reach server")
+            }
+            let dir = temp("hex-bundle").join("note.hexannotation");
+            std::fs::create_dir(&dir).unwrap();
+            let b: ScrawlBundle = serde_json::from_slice(include_bytes!(
+                "../../tests/fixtures/annotations/marked-v1.json"
+            ))
+            .unwrap();
+            scrawl_capture::bundle::publish(&dir, &b).unwrap();
+            let router = router_with(|_| {});
+            let retries = router.dirs().retries.clone().unwrap();
+            let outcomes = SharedOutcomes::default();
+            let mut worker = worker(outcomes.clone());
+            worker.forward = offline;
+            lock(&outcomes).settle(dir.clone(), CaptureEnd::Failed("test".into()));
+            let (look, found) = held_look(router, look::Live::default());
+            let _ = found.try_send(Some(look::Live::default()));
+            worker.written(dir.clone(), look);
+            settle(&mut worker);
+
+            worker.chosen("ses_board", false);
+            assert!(dir.join(delivery::PENDING).is_file());
+            assert_eq!(retries.read_dir().unwrap().count(), 1);
+
+            worker.undo();
+            assert!(!dir.join(delivery::PENDING).exists());
+            assert_eq!(retries.read_dir().unwrap().count(), 0);
+            assert_eq!(
+                worker.current.as_ref().unwrap().send.delivery(),
+                Some(RouteDelivery::TakenBack)
+            );
+            std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+            std::fs::remove_dir_all(retries.parent().unwrap()).ok();
         }
     }
 }
